@@ -12,7 +12,7 @@ type UserName inherits String
 [[ The user's email address ]]
 type UserEmail inherits String
 
-model User {
+closed model User {
    id : UserId
    name : UserName
    email : UserEmail
@@ -30,6 +30,6 @@ service JsonPlaceholderApi {
       url = "https://jsonplaceholder.typicode.com/users/{id}"
    )
    operation getUser(
-      @PathVariable(name = "id") id : UserId
-   ): User
+      @PathVariable("id") id : UserId
+   ): User(UserId == id)
 }
