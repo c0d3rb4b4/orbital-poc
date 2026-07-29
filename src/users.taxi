@@ -1,0 +1,35 @@
+import taxi.http.HttpOperation
+import taxi.http.PathVariable
+
+namespace com.lalit.poc
+
+[[ Unique identifier for a user ]]
+type UserId inherits Int
+
+[[ The user's display name ]]
+type UserName inherits String
+
+[[ The user's email address ]]
+type UserEmail inherits String
+
+model User {
+   id : UserId
+   name : UserName
+   email : UserEmail
+}
+
+service JsonPlaceholderApi {
+   @HttpOperation(
+      method = "GET",
+      url = "https://jsonplaceholder.typicode.com/users"
+   )
+   operation getUsers(): User[]
+
+   @HttpOperation(
+      method = "GET",
+      url = "https://jsonplaceholder.typicode.com/users/{id}"
+   )
+   operation getUser(
+      @PathVariable(name = "id") id : UserId
+   ): User
+}
