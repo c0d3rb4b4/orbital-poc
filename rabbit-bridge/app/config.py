@@ -4,6 +4,13 @@ import os
 from dataclasses import dataclass
 
 
+def _env(name: str, default: str, *, legacy_name: str | None = None) -> str:
+    value = os.getenv(name)
+    if value is None and legacy_name is not None:
+        value = os.getenv(legacy_name)
+    return default if value is None else value
+
+
 def _bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -30,6 +37,14 @@ def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
     return value
 
 
+def _choice_env(name: str, default: str, *, choices: set[str]) -> str:
+    value = os.getenv(name, default).strip().lower()
+    if value not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise ValueError(f"{name} must be one of: {allowed}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     rabbitmq_host: str = "rabbitmq"
@@ -42,8 +57,10 @@ class Settings:
 
     exchange: str = "poc.customer-account.events"
     adobe_to_sap_routing_key: str = "customer-account.adobe.updated"
-    sap_to_adobe_queue: str = "poc.customer-account.sap-to-adobe"
-    sap_to_adobe_routing_pattern: str = "customer-account.sap.*"
+    consumer_queue: str = "poc.customer-account.sap-to-adobe"
+    consumer_routing_pattern: str = "customer-account.sap.*"
+    consumer_expected_origin: str = "sap"
+    consumer_require_adobe_customer_id: bool = True
     consumer_prefetch: int = 1
     consumer_enabled: bool = True
     consumer_reconnect_delay: float = 5.0
@@ -52,18 +69,36 @@ class Settings:
     event_type: str = "customer-account.updated.v1"
 
     orbital_base_url: str = "http://orbital:9022"
-    orbital_sap_to_adobe_path: str = "/api/q/customer-account/from-sap"
+    orbital_consumer_path: str = "/api/q/customer-account/from-sap"
+    orbital_consumer_payload_format: str = "xml"
     orbital_timeout: float = 30.0
 
     http_host: str = "0.0.0.0"
     bridge_port: int = 8080
 
     @property
-    def orbital_sap_url(self) -> str:
+    def orbital_consumer_url(self) -> str:
         return (
             f"{self.orbital_base_url.rstrip('/')}"
-            f"/{self.orbital_sap_to_adobe_path.lstrip('/')}"
+            f"/{self.orbital_consumer_path.lstrip('/')}"
         )
+
+    # Compatibility aliases keep the original SAP-to-Adobe configuration API usable.
+    @property
+    def sap_to_adobe_queue(self) -> str:
+        return self.consumer_queue
+
+    @property
+    def sap_to_adobe_routing_pattern(self) -> str:
+        return self.consumer_routing_pattern
+
+    @property
+    def orbital_sap_to_adobe_path(self) -> str:
+        return self.orbital_consumer_path
+
+    @property
+    def orbital_sap_url(self) -> str:
+        return self.orbital_consumer_url
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -83,12 +118,24 @@ class Settings:
                 "RABBITMQ_ADOBE_TO_SAP_ROUTING_KEY",
                 cls.adobe_to_sap_routing_key,
             ),
-            sap_to_adobe_queue=os.getenv(
-                "RABBITMQ_SAP_TO_ADOBE_QUEUE", cls.sap_to_adobe_queue
+            consumer_queue=_env(
+                "RABBITMQ_CONSUMER_QUEUE",
+                cls.consumer_queue,
+                legacy_name="RABBITMQ_SAP_TO_ADOBE_QUEUE",
             ),
-            sap_to_adobe_routing_pattern=os.getenv(
-                "RABBITMQ_SAP_TO_ADOBE_ROUTING_PATTERN",
-                cls.sap_to_adobe_routing_pattern,
+            consumer_routing_pattern=_env(
+                "RABBITMQ_CONSUMER_ROUTING_PATTERN",
+                cls.consumer_routing_pattern,
+                legacy_name="RABBITMQ_SAP_TO_ADOBE_ROUTING_PATTERN",
+            ),
+            consumer_expected_origin=os.getenv(
+                "RABBITMQ_CONSUMER_EXPECTED_ORIGIN", cls.consumer_expected_origin
+            )
+            .strip()
+            .lower(),
+            consumer_require_adobe_customer_id=_bool_env(
+                "RABBITMQ_CONSUMER_REQUIRE_ADOBE_CUSTOMER_ID",
+                cls.consumer_require_adobe_customer_id,
             ),
             consumer_prefetch=_int_env(
                 "RABBITMQ_CONSUMER_PREFETCH", cls.consumer_prefetch
@@ -101,8 +148,15 @@ class Settings:
             expected_schema=os.getenv("CUSTOMER_ACCOUNT_SCHEMA", cls.expected_schema),
             event_type=os.getenv("CUSTOMER_ACCOUNT_EVENT_TYPE", cls.event_type),
             orbital_base_url=os.getenv("ORBITAL_BASE_URL", cls.orbital_base_url),
-            orbital_sap_to_adobe_path=os.getenv(
-                "ORBITAL_SAP_TO_ADOBE_PATH", cls.orbital_sap_to_adobe_path
+            orbital_consumer_path=_env(
+                "ORBITAL_CONSUMER_PATH",
+                cls.orbital_consumer_path,
+                legacy_name="ORBITAL_SAP_TO_ADOBE_PATH",
+            ),
+            orbital_consumer_payload_format=_choice_env(
+                "ORBITAL_CONSUMER_PAYLOAD_FORMAT",
+                cls.orbital_consumer_payload_format,
+                choices={"json", "xml"},
             ),
             orbital_timeout=_float_env("ORBITAL_TIMEOUT", cls.orbital_timeout),
             http_host=os.getenv("HTTP_HOST", cls.http_host),

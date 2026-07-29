@@ -10,6 +10,7 @@ import pika
 
 from app.config import Settings
 from app.metadata import MetadataValidationError, TransportMetadata, metadata_from_amqp
+from app.sap_xml import sap_xml_to_json
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,16 +56,25 @@ class OrbitalForwarder:
         target_url: str,
         timeout: float,
         client: httpx.Client | None = None,
+        *,
+        payload_format: str = "xml",
     ) -> None:
+        if payload_format not in {"json", "xml"}:
+            raise ValueError("payload_format must be 'xml' or 'json'")
         self._target_url = target_url
         self._client = client or httpx.Client(timeout=timeout)
         self._owns_client = client is None
+        self._payload_format = payload_format
 
     def forward(self, body: bytes, metadata: TransportMetadata) -> bool:
+        headers = metadata.orbital_headers()
+        if self._payload_format == "json":
+            body = sap_xml_to_json(body)
+            headers["Content-Type"] = "application/json"
         response = self._client.post(
             self._target_url,
             content=body,
-            headers=metadata.orbital_headers(),
+            headers=headers,
         )
         return 200 <= response.status_code < 300
 
@@ -74,7 +84,7 @@ class OrbitalForwarder:
 
 
 class RabbitConsumer:
-    """Consumes SAP-origin XML and forwards it to Orbital with manual acknowledgements."""
+    """Consumes routed XML and forwards it to Orbital with manual acknowledgements."""
 
     def __init__(
         self,
@@ -111,7 +121,7 @@ class RabbitConsumer:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run,
-            name="rabbit-sap-to-adobe-consumer",
+            name=f"rabbit-{self._settings.consumer_expected_origin}-consumer",
             daemon=True,
         )
         self._thread.start()
@@ -139,21 +149,21 @@ class RabbitConsumer:
                 self._connection = self._connection_factory(self._parameters())
                 self._channel = self._connection.channel()
                 self._channel.queue_declare(
-                    queue=self._settings.sap_to_adobe_queue,
+                    queue=self._settings.consumer_queue,
                     passive=True,
                 )
                 self._channel.basic_qos(
                     prefetch_count=self._settings.consumer_prefetch
                 )
                 self._channel.basic_consume(
-                    queue=self._settings.sap_to_adobe_queue,
+                    queue=self._settings.consumer_queue,
                     on_message_callback=self.handle_delivery,
                     auto_ack=False,
                 )
                 self.state.update(connected=True, clear_error=True)
                 LOGGER.info(
                     "Consuming queue %s with prefetch=%s",
-                    self._settings.sap_to_adobe_queue,
+                    self._settings.consumer_queue,
                     self._settings.consumer_prefetch,
                 )
                 self._channel.start_consuming()
@@ -203,8 +213,12 @@ class RabbitConsumer:
                 method.routing_key,
                 properties,
                 expected_schema=self._settings.expected_schema,
-                expected_routing_pattern=self._settings.sap_to_adobe_routing_pattern,
+                expected_routing_pattern=self._settings.consumer_routing_pattern,
                 expected_event_type=self._settings.event_type,
+                expected_origin=self._settings.consumer_expected_origin,
+                require_adobe_customer_id=(
+                    self._settings.consumer_require_adobe_customer_id
+                ),
             )
         except MetadataValidationError as exc:
             LOGGER.warning(

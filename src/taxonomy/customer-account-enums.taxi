@@ -20,6 +20,17 @@ enum CustomerAccountStatus {
    ON_HOLD("ON_HOLD")
 }
 
+enum CustomerAccountGroup {
+   INDIVIDUAL("INDIVIDUAL"),
+   ORGANISATION("ORGANISATION")
+}
+
+enum CustomerAccountType {
+   RETAIL("RETAIL"),
+   WHOLESALE("WHOLESALE"),
+   WINE_CLUB("WINECLUB")
+}
+
 enum CustomerContactPreference {
    EMAIL_ONLY("EMAIL_ONLY"),
    POST_ONLY("POST_ONLY"),

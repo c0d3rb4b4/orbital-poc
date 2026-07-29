@@ -29,8 +29,9 @@ def create_app(
     publisher = publisher or RabbitPublisher(settings)
     if consumer is None:
         forwarder = OrbitalForwarder(
-            settings.orbital_sap_url,
+            settings.orbital_consumer_url,
             settings.orbital_timeout,
+            payload_format=settings.orbital_consumer_payload_format,
         )
         consumer = RabbitConsumer(settings, forwarder)
 

@@ -13,5 +13,14 @@ stack {
             ContentType.Application.Json
          )
       }
+
+      post("/customer-accounts") { call ->
+         val requestBody = call.receiveText()
+         println("FWT_STUB_CAPTURE body=$requestBody")
+         call.respondText(
+            """{ "status": "accepted" }""",
+            ContentType.Application.Json
+         )
+      }
    }
 }

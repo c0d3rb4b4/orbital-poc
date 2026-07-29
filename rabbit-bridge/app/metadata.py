@@ -220,6 +220,8 @@ def metadata_from_amqp(
     expected_schema: str,
     expected_routing_pattern: str | None = None,
     expected_event_type: str | None = None,
+    expected_origin: str = "sap",
+    require_adobe_customer_id: bool = True,
 ) -> TransportMetadata:
     if expected_routing_pattern is not None and not routing_key_matches(
         expected_routing_pattern, routing_key
@@ -269,10 +271,10 @@ def metadata_from_amqp(
     )
     metadata.validate_for_route(
         routing_key,
-        expected_origin="sap",
+        expected_origin=expected_origin,
         allowed_actions={"UPDATE"},
         expected_schema=expected_schema,
         expected_event_type=expected_event_type,
-        require_adobe_customer_id=True,
+        require_adobe_customer_id=require_adobe_customer_id,
     )
     return metadata

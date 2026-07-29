@@ -1,0 +1,25 @@
+import taxi.http.HttpHeader
+import taxi.http.HttpOperation
+import taxi.http.HttpService
+import taxi.http.RequestBody
+
+import com.lalit.poc.fwt.FwtCustomerAccount
+import com.lalit.poc.fwt.FwtCustomerWriteResponse
+import com.lalit.poc.taxonomy.CustomerAccountCausationId
+import com.lalit.poc.taxonomy.CustomerAccountCorrelationId
+import com.lalit.poc.taxonomy.CustomerAccountMessageId
+
+namespace com.lalit.poc.services
+
+@HttpService(baseUrl = "http://fwt-stub")
+service FwtCustomerService {
+   @HttpOperation(method = "POST", url = "/customer-accounts")
+   @HttpHeader(name = "Content-Type", value = "application/json")
+   @HttpHeader(name = "X-Integration-Write", value = "true")
+   write operation updateCustomer(
+      @RequestBody request : FwtCustomerAccount,
+      @HttpHeader(name = "X-Message-Id") messageId : CustomerAccountMessageId,
+      @HttpHeader(name = "X-Correlation-Id") correlationId : CustomerAccountCorrelationId,
+      @HttpHeader(name = "X-Causation-Id") causationId : CustomerAccountCausationId?
+   ): FwtCustomerWriteResponse
+}

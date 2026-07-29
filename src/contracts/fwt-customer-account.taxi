@@ -1,0 +1,131 @@
+import taxi.stdlib.concat
+import taxi.stdlib.left
+import taxi.stdlib.mid
+
+import com.lalit.poc.taxonomy.AddressLine1
+import com.lalit.poc.taxonomy.AddressLine2
+import com.lalit.poc.taxonomy.CountryCode
+import com.lalit.poc.taxonomy.CustomerAccountAction
+import com.lalit.poc.taxonomy.CustomerAccountGroup
+import com.lalit.poc.taxonomy.CustomerAccountStatus
+import com.lalit.poc.taxonomy.CustomerAccountType
+import com.lalit.poc.taxonomy.CustomerContactPreference
+import com.lalit.poc.taxonomy.CustomerDateOfBirth
+import com.lalit.poc.taxonomy.CustomerEmailAddress
+import com.lalit.poc.taxonomy.CustomerFirstName
+import com.lalit.poc.taxonomy.CustomerLastName
+import com.lalit.poc.taxonomy.MobileNumber
+import com.lalit.poc.taxonomy.Postcode
+import com.lalit.poc.taxonomy.RegionCode
+import com.lalit.poc.taxonomy.SapCustomerNumber
+import com.lalit.poc.taxonomy.TelephoneNumber
+import com.lalit.poc.taxonomy.Town
+
+namespace com.lalit.poc.fwt
+
+[[ FWT-owned scalar facts that are derived from reusable customer facts. ]]
+type FwtCustomerDisplayName inherits String
+type FwtCustomerBirthDate inherits String
+type FwtPostContactPreference inherits Boolean
+type FwtEmailContactPreference inherits Boolean
+type FwtResponseStatus inherits String
+
+enum FwtCustomerAccountStatus {
+   ACTIVE("ACTIVE") synonym of CustomerAccountStatus.ACTIVE,
+   BLOCKED("BLOCKED") synonym of CustomerAccountStatus.BLOCKED,
+   DEACTIVE("DEACTIVE") synonym of CustomerAccountStatus.DEACTIVATED,
+   DECLINED("DECLINED") synonym of CustomerAccountStatus.DECLINED,
+   INPROCESS("INPROCESS") synonym of CustomerAccountStatus.IN_PROCESS,
+   ONHOLD("ONHOLD") synonym of CustomerAccountStatus.ON_HOLD
+}
+
+enum FwtCustomerAccountAction {
+   UPDATE("UPDATE") synonym of CustomerAccountAction.UPDATE
+}
+
+enum FwtCustomerAccountGroup {
+   INDIVIDUAL("INDIVIDUAL") synonym of CustomerAccountGroup.INDIVIDUAL,
+   ORGANISATION("ORGANISATION") synonym of CustomerAccountGroup.ORGANISATION
+}
+
+enum FwtCustomerAccountType {
+   RETAIL("RETAIL") synonym of CustomerAccountType.RETAIL,
+   WHOLESALE("WHOLESALE") synonym of CustomerAccountType.WHOLESALE,
+   WINECLUB("WINECLUB") synonym of CustomerAccountType.WINE_CLUB
+}
+
+parameter closed model FwtCountry {
+   isocode : CountryCode
+}
+
+parameter closed model FwtRecipient {
+   firstName : CustomerFirstName
+   familyName : CustomerLastName
+}
+
+parameter closed model FwtAddressDetails {
+   id : SapCustomerNumber
+   town : Town
+   email : CustomerEmailAddress
+   county : RegionCode?
+   street : AddressLine1
+   country : FwtCountry
+   postcode : Postcode
+   cellphone : MobileNumber?
+   recipient : FwtRecipient
+   phoneNumber : TelephoneNumber
+   buildingName : AddressLine2?
+}
+
+parameter closed model FwtCustomerName {
+   firstName : CustomerFirstName
+   familyName : CustomerLastName
+}
+
+parameter closed model FwtCustomerDetails {
+   name : FwtCustomerName
+   birthDate : FwtCustomerBirthDate by (FwtCustomerBirthDate) concat(
+      CustomerDateOfBirth.left(4),
+      "-",
+      CustomerDateOfBirth.mid(4, 6),
+      "-",
+      CustomerDateOfBirth.mid(6, 8)
+   )
+}
+
+parameter closed model FwtContactPreferences {
+   post : FwtPostContactPreference by when {
+      CustomerContactPreference == CustomerContactPreference.POST_ONLY || CustomerContactPreference == CustomerContactPreference.EMAIL_AND_POST -> true
+      else -> false
+   }
+   email : FwtEmailContactPreference by when {
+      CustomerContactPreference == CustomerContactPreference.EMAIL_ONLY || CustomerContactPreference == CustomerContactPreference.EMAIL_AND_POST -> true
+      else -> false
+   }
+}
+
+parameter closed model FwtAccountAttributes {
+   contactPreferences : FwtContactPreferences
+}
+
+[[
+  Deterministic first parity slice of BIP's CustomerAccountCanonical payload.
+  Runtime timestamps, balances, banks and reference-data descriptions are
+  deliberately excluded until their authoritative sources are defined.
+]]
+parameter closed model FwtCustomerAccount {
+   id : SapCustomerNumber
+   name : FwtCustomerDisplayName by (FwtCustomerDisplayName) concat(CustomerFirstName, " ", CustomerLastName)
+   type : FwtCustomerAccountType
+   email : CustomerEmailAddress
+   status : FwtCustomerAccountStatus
+   actionCode : FwtCustomerAccountAction
+   customerGroup : FwtCustomerAccountGroup
+   addressDetails : FwtAddressDetails
+   customerDetails : FwtCustomerDetails
+   accountAttributes : FwtAccountAttributes
+}
+
+closed model FwtCustomerWriteResponse {
+   status : FwtResponseStatus
+}

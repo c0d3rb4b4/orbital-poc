@@ -1,0 +1,40 @@
+{
+  "id": "00010001",
+  "name": "Ada Lovelace",
+  "type": "RETAIL",
+  "email": "ada.lovelace@example.test",
+  "status": "ACTIVE",
+  "actionCode": "UPDATE",
+  "customerGroup": "INDIVIDUAL",
+  "addressDetails": {
+    "id": "00010001",
+    "town": "London",
+    "email": "ada.lovelace@example.test",
+    "county": "LND",
+    "street": "12 St James Square",
+    "country": {
+      "isocode": "GB"
+    },
+    "postcode": "SW1Y 4LB",
+    "cellphone": "+447700900001",
+    "recipient": {
+      "firstName": "Ada",
+      "familyName": "Lovelace"
+    },
+    "phoneNumber": "+442079460000",
+    "buildingName": "Westminster"
+  },
+  "customerDetails": {
+    "name": {
+      "firstName": "Ada",
+      "familyName": "Lovelace"
+    },
+    "birthDate": "1815-12-10"
+  },
+  "accountAttributes": {
+    "contactPreferences": {
+      "post": true,
+      "email": true
+    }
+  }
+}

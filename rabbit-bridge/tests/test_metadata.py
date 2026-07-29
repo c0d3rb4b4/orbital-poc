@@ -144,3 +144,58 @@ def test_amqp_metadata_requires_reverse_route_identity() -> None:
             expected_routing_pattern="customer-account.sap.*",
             expected_event_type="customer-account.updated.v1",
         )
+
+
+@pytest.mark.parametrize("origin", ["adobe", "sap"])
+def test_amqp_metadata_supports_fwt_routes_without_reverse_identity(origin: str) -> None:
+    properties = SimpleNamespace(
+        content_type="application/xml",
+        delivery_mode=2,
+        message_id=MESSAGE_ID,
+        correlation_id=CORRELATION_ID,
+        type="customer-account.updated.v1",
+        headers={
+            "x-origin": origin,
+            "x-action": "UPDATE",
+            "x-schema": "sap.zbupa-cbo.v1",
+        },
+    )
+
+    metadata = metadata_from_amqp(
+        f"customer-account.{origin}.updated",
+        properties,
+        expected_schema="sap.zbupa-cbo.v1",
+        expected_routing_pattern=f"customer-account.{origin}.*",
+        expected_event_type="customer-account.updated.v1",
+        expected_origin=origin,
+        require_adobe_customer_id=False,
+    )
+
+    assert metadata.origin == origin
+    assert metadata.adobe_customer_id is None
+
+
+def test_amqp_metadata_rejects_origin_outside_configured_worker_route() -> None:
+    properties = SimpleNamespace(
+        content_type="application/xml",
+        delivery_mode=2,
+        message_id=MESSAGE_ID,
+        correlation_id=CORRELATION_ID,
+        type="customer-account.updated.v1",
+        headers={
+            "x-origin": "sap",
+            "x-action": "UPDATE",
+            "x-schema": "sap.zbupa-cbo.v1",
+        },
+    )
+
+    with pytest.raises(MetadataValidationError, match="Route origin must be 'adobe'"):
+        metadata_from_amqp(
+            "customer-account.sap.updated",
+            properties,
+            expected_schema="sap.zbupa-cbo.v1",
+            expected_routing_pattern="customer-account.sap.*",
+            expected_event_type="customer-account.updated.v1",
+            expected_origin="adobe",
+            require_adobe_customer_id=False,
+        )

@@ -5,7 +5,9 @@ import com.lalit.poc.taxonomy.AddressLine1
 import com.lalit.poc.taxonomy.AddressLine2
 import com.lalit.poc.taxonomy.CountryCode
 import com.lalit.poc.taxonomy.CustomerAccountAction
+import com.lalit.poc.taxonomy.CustomerAccountGroup
 import com.lalit.poc.taxonomy.CustomerAccountStatus
+import com.lalit.poc.taxonomy.CustomerAccountType
 import com.lalit.poc.taxonomy.CustomerContactPreference
 import com.lalit.poc.taxonomy.CustomerDateOfBirth
 import com.lalit.poc.taxonomy.CustomerEmailAddress
@@ -39,14 +41,14 @@ enum SapIdocDirection {
 }
 
 enum SapCustomerAccountGroup {
-   INDIVIDUAL("1"),
-   ORGANISATION("2")
+   INDIVIDUAL("1") synonym of CustomerAccountGroup.INDIVIDUAL,
+   ORGANISATION("2") synonym of CustomerAccountGroup.ORGANISATION
 }
 
 enum SapCustomerAccountType {
-   RETAIL("01"),
-   WHOLESALE("02"),
-   WINE_CLUB("03")
+   RETAIL("01") synonym of CustomerAccountType.RETAIL,
+   WHOLESALE("02") synonym of CustomerAccountType.WHOLESALE,
+   WINE_CLUB("03") synonym of CustomerAccountType.WINE_CLUB
 }
 
 enum SapMessageFunction {
