@@ -1,0 +1,31 @@
+import taxi.http.HttpHeader
+import taxi.http.HttpOperation
+import taxi.http.RequestBody
+
+import com.lalit.poc.sap.ZbupaCustomerAccountIdoc
+import com.lalit.poc.taxonomy.AdobeCustomerId
+import com.lalit.poc.taxonomy.CustomerAccountAction
+import com.lalit.poc.taxonomy.CustomerAccountCausationId
+import com.lalit.poc.taxonomy.CustomerAccountCorrelationId
+import com.lalit.poc.taxonomy.CustomerAccountMessageId
+import com.lalit.poc.taxonomy.CustomerAccountOrigin
+
+namespace com.lalit.poc.queries
+
+[[
+  Called by rabbit-bridge for SAP-origin messages. The Adobe id is an explicit
+  Phase 1 cross-reference and is never inferred from SapCustomerNumber.
+]]
+@HttpOperation(url = "/api/q/customer-account/from-sap", method = "POST")
+query sapCustomerAccountToAdobe(
+   @RequestBody idoc : ZbupaCustomerAccountIdoc,
+   @HttpHeader(name = "X-Message-Id") messageId : CustomerAccountMessageId,
+   @HttpHeader(name = "X-Correlation-Id") correlationId : CustomerAccountCorrelationId,
+   @HttpHeader(name = "X-Causation-Id") causationId : CustomerAccountCausationId?,
+   @HttpHeader(name = "X-System-Origin") origin : CustomerAccountOrigin,
+   @HttpHeader(name = "X-Account-Action") action : CustomerAccountAction,
+   @HttpHeader(name = "X-Adobe-Customer-Id") adobeCustomerId : AdobeCustomerId
+) {
+   given { idoc, messageId, correlationId, causationId, origin, action, adobeCustomerId }
+   call com.lalit.poc.services.AdobeCustomerService::updateCustomer
+}

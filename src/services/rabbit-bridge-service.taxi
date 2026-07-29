@@ -1,0 +1,40 @@
+import taxi.http.HttpHeader
+import taxi.http.HttpOperation
+import taxi.http.RequestBody
+import taxi.http.HttpService
+
+import com.lalit.poc.sap.ZbupaCustomerAccountPublishRequest
+import com.lalit.poc.taxonomy.AdobeCustomerId
+import com.lalit.poc.taxonomy.CustomerAccountAction
+import com.lalit.poc.taxonomy.CustomerAccountCausationId
+import com.lalit.poc.taxonomy.CustomerAccountCorrelationId
+import com.lalit.poc.taxonomy.CustomerAccountMessageId
+import com.lalit.poc.taxonomy.CustomerAccountOrigin
+import com.lalit.poc.taxonomy.CustomerAccountRoutingKey
+import com.lalit.poc.taxonomy.IntegrationResultStatus
+
+namespace com.lalit.poc.services
+
+closed model RabbitPublishReceipt {
+   status : IntegrationResultStatus
+   message_id : CustomerAccountMessageId
+   correlation_id : CustomerAccountCorrelationId
+   routing_key : CustomerAccountRoutingKey
+}
+
+@HttpService(baseUrl = "http://rabbit-bridge")
+service RabbitBridgeService {
+   @HttpOperation(method = "POST", url = "/publish")
+   @HttpHeader(name = "Content-Type", value = "application/json")
+   @HttpHeader(name = "X-Schema", value = "sap.zbupa-cbo.v1")
+   @HttpHeader(name = "X-Event-Type", value = "customer-account.updated.v1")
+   write operation publishCustomerAccountUpdate(
+      @RequestBody idoc : ZbupaCustomerAccountPublishRequest,
+      @HttpHeader(name = "X-Message-Id") messageId : CustomerAccountMessageId,
+      @HttpHeader(name = "X-Correlation-Id") correlationId : CustomerAccountCorrelationId,
+      @HttpHeader(name = "X-Causation-Id") causationId : CustomerAccountCausationId?,
+      @HttpHeader(name = "X-System-Origin") origin : CustomerAccountOrigin,
+      @HttpHeader(name = "X-Account-Action") action : CustomerAccountAction,
+      @HttpHeader(name = "X-Adobe-Customer-Id") adobeCustomerId : AdobeCustomerId
+   ): RabbitPublishReceipt
+}

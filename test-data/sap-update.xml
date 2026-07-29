@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ZBUPA_CBO>
+  <IDOC BEGIN="1">
+    <EDI_DC40 SEGMENT="1">
+      <TABNAM>EDI_DC40</TABNAM>
+      <MANDT>100</MANDT>
+      <DOCREL>751</DOCREL>
+      <DIRECT>2</DIRECT>
+      <IDOCTYP>ZBUPA_CBO</IDOCTYP>
+      <MESTYP>ZBUPA_HYBRIS_IN</MESTYP>
+      <SNDPRT>LS</SNDPRT>
+      <SNDPRN>SAP</SNDPRN>
+    </EDI_DC40>
+    <ZBP_CBO SEGMENT="1">
+      <MSGFN>004</MSGFN>
+      <KTOKD>1</KTOKD>
+      <KUNNR>00010001</KUNNR>
+      <NAME1>Ada</NAME1>
+      <NAME2>Lovelace</NAME2>
+      <STRAS>12 St James Square</STRAS>
+      <PSOO4>Westminster</PSOO4>
+      <PSTLZ>SW1Y 4LB</PSTLZ>
+      <ORT01>London</ORT01>
+      <LAND1>GB</LAND1>
+      <TELF1>+442079460000</TELF1>
+      <REGIO>LND</REGIO>
+      <KNURL>ada.lovelace@example.test</KNURL>
+      <RGDATE>18151210</RGDATE>
+    </ZBP_CBO>
+    <ZBP_CBO2 SEGMENT="1">
+      <KDGRP>02</KDGRP>
+      <KATR1>01</KATR1>
+      <KATR5>AC</KATR5>
+      <KATR10>PEM</KATR10>
+      <MOB_NUMBER>+447700900001</MOB_NUMBER>
+    </ZBP_CBO2>
+  </IDOC>
+</ZBUPA_CBO>

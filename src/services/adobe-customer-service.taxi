@@ -1,0 +1,28 @@
+import taxi.http.HttpHeader
+import taxi.http.HttpOperation
+import taxi.http.RequestBody
+import taxi.http.HttpService
+import taxi.http.PathVariable
+
+import com.lalit.poc.adobe.AdobeCustomerWriteRequest
+import com.lalit.poc.adobe.AdobeCustomerWriteResponse
+import com.lalit.poc.taxonomy.AdobeCustomerId
+import com.lalit.poc.taxonomy.CustomerAccountCausationId
+import com.lalit.poc.taxonomy.CustomerAccountCorrelationId
+import com.lalit.poc.taxonomy.CustomerAccountMessageId
+
+namespace com.lalit.poc.services
+
+@HttpService(baseUrl = "http://adobe-stub")
+service AdobeCustomerService {
+   @HttpOperation(method = "PUT", url = "/rest/V1/customers/{adobeCustomerId}")
+   @HttpHeader(name = "Content-Type", value = "application/json")
+   @HttpHeader(name = "X-Integration-Write", value = "true")
+   write operation updateCustomer(
+      @PathVariable("adobeCustomerId") adobeCustomerId : AdobeCustomerId,
+      @RequestBody request : AdobeCustomerWriteRequest,
+      @HttpHeader(name = "X-Message-Id") messageId : CustomerAccountMessageId,
+      @HttpHeader(name = "X-Correlation-Id") correlationId : CustomerAccountCorrelationId,
+      @HttpHeader(name = "X-Causation-Id") causationId : CustomerAccountCausationId?
+   ): AdobeCustomerWriteResponse
+}

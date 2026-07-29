@@ -1,0 +1,104 @@
+import com.orbitalhq.formats.Xml
+import lang.taxi.xml.XmlAttribute
+
+import com.lalit.poc.taxonomy.AddressLine1
+import com.lalit.poc.taxonomy.AddressLine2
+import com.lalit.poc.taxonomy.CountryCode
+import com.lalit.poc.taxonomy.CustomerAccountAction
+import com.lalit.poc.taxonomy.CustomerAccountStatus
+import com.lalit.poc.taxonomy.CustomerContactPreference
+import com.lalit.poc.taxonomy.CustomerDateOfBirth
+import com.lalit.poc.taxonomy.CustomerEmailAddress
+import com.lalit.poc.taxonomy.CustomerFirstName
+import com.lalit.poc.taxonomy.CustomerLastName
+import com.lalit.poc.taxonomy.MobileNumber
+import com.lalit.poc.taxonomy.Postcode
+import com.lalit.poc.taxonomy.RegionCode
+import com.lalit.poc.taxonomy.SapCustomerNumber
+import com.lalit.poc.taxonomy.SapTitleCode
+import com.lalit.poc.taxonomy.TelephoneNumber
+import com.lalit.poc.taxonomy.Town
+
+namespace com.lalit.poc.sap
+
+enum SapMessageFunction {
+   UPDATE("004") synonym of CustomerAccountAction.UPDATE
+}
+
+enum SapCustomerAccountStatus {
+   ACTIVE("AC") synonym of CustomerAccountStatus.ACTIVE,
+   BLOCKED("BL") synonym of CustomerAccountStatus.BLOCKED,
+   DEACTIVATED("DC") synonym of CustomerAccountStatus.DEACTIVATED,
+   DECLINED("DE") synonym of CustomerAccountStatus.DECLINED,
+   IN_PROCESS("IN") synonym of CustomerAccountStatus.IN_PROCESS,
+   ON_HOLD("OH") synonym of CustomerAccountStatus.ON_HOLD
+}
+
+enum SapContactPreference {
+   EMAIL_ONLY("EML") synonym of CustomerContactPreference.EMAIL_ONLY,
+   POST_ONLY("PST") synonym of CustomerContactPreference.POST_ONLY,
+   EMAIL_AND_POST("PEM") synonym of CustomerContactPreference.EMAIL_AND_POST,
+   NONE("NON") synonym of CustomerContactPreference.NONE
+}
+
+parameter closed model ZbupaControlRecord {
+   @XmlAttribute SEGMENT : String by "1"
+   TABNAM : String by "EDI_DC40"
+   MANDT : String by "100"
+   DOCREL : String by "751"
+   DIRECT : String by "2"
+   IDOCTYP : String by "ZBUPA_CBO"
+   MESTYP : String by "ZBUPA_HYBRIS_IN"
+   SNDPRT : String by "LS"
+   SNDPRN : String by "BIP"
+}
+
+parameter closed model ZbupaCustomerCoreSegment {
+   @XmlAttribute SEGMENT : String by "1"
+   MSGFN : SapMessageFunction
+   KTOKD : String by "1"
+   KUNNR : SapCustomerNumber
+   ANRED : SapTitleCode?
+   NAME1 : CustomerFirstName
+   NAME2 : CustomerLastName
+   STRAS : AddressLine1
+   PSOO4 : AddressLine2?
+   PSTLZ : Postcode
+   ORT01 : Town
+   LAND1 : CountryCode
+   TELF1 : TelephoneNumber
+   REGIO : RegionCode?
+   KNURL : CustomerEmailAddress
+   RGDATE : CustomerDateOfBirth
+}
+
+parameter closed model ZbupaCustomerSecondarySegment {
+   @XmlAttribute SEGMENT : String by "1"
+   KDGRP : String by "02"
+   KATR1 : String by "01"
+   KATR5 : SapCustomerAccountStatus
+   KATR10 : SapContactPreference
+   MOB_NUMBER : MobileNumber?
+}
+
+parameter closed model ZbupaCustomerAccountDocument {
+   @XmlAttribute BEGIN : String by "1"
+   EDI_DC40 : ZbupaControlRecord
+   ZBP_CBO : ZbupaCustomerCoreSegment
+   ZBP_CBO2 : ZbupaCustomerSecondarySegment
+}
+
+@Xml
+parameter closed model ZbupaCustomerAccountIdoc {
+   IDOC : ZbupaCustomerAccountDocument
+}
+
+[[
+  Orbital 0.38 can deserialize @Xml models, but its HTTP request factory calls
+  the XML serializer's unsupported raw-object overload.  The publish operation
+  therefore sends this structurally identical JSON envelope to the transport
+  bridge, which performs XML wire serialization without mapping business data.
+]]
+parameter closed model ZbupaCustomerAccountPublishRequest {
+   IDOC : ZbupaCustomerAccountDocument
+}

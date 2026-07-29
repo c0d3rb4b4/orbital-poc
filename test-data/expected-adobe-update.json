@@ -1,0 +1,47 @@
+{
+  "customer": {
+    "id": "00010001",
+    "email": "ada.lovelace@example.test",
+    "firstname": "Ada",
+    "lastname": "Lovelace",
+    "dob": "18151210",
+    "addresses": [
+      {
+        "region": {
+          "region_code": "LND"
+        },
+        "country_id": "GB",
+        "street": [
+          "12 St James Square",
+          "Westminster"
+        ],
+        "telephone": "+442079460000",
+        "alt_telephone": "+447700900001",
+        "postcode": "SW1Y 4LB",
+        "city": "London",
+        "firstname": "Ada",
+        "lastname": "Lovelace",
+        "default_shipping": true,
+        "default_billing": true
+      }
+    ],
+    "custom_attributes": [
+      {
+        "attribute_code": "sap_unique_id",
+        "value": "00010001"
+      },
+      {
+        "attribute_code": "cellar_plan_status",
+        "value": "ACTIVE"
+      },
+      {
+        "attribute_code": "allow_email_communication",
+        "value": "true"
+      },
+      {
+        "attribute_code": "allow_post_communication",
+        "value": "true"
+      }
+    ]
+  }
+}

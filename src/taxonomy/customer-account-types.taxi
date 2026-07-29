@@ -1,0 +1,37 @@
+namespace com.lalit.poc.taxonomy
+
+[[ Transport lineage is kept outside the business payloads. ]]
+type CustomerAccountMessageId inherits String
+type CustomerAccountCorrelationId inherits String
+type CustomerAccountCausationId inherits String
+
+[[ Adobe and SAP identities are deliberately different semantic facts. ]]
+type AdobeCustomerId inherits String
+type SapCustomerNumber inherits String
+
+type CustomerFirstName inherits String
+type CustomerLastName inherits String
+type CustomerTitle inherits String
+
+[[ Phase 1 uses yyyyMMdd in both synthetic contracts. ]]
+type CustomerDateOfBirth inherits String
+
+type CustomerEmailAddress inherits String
+type TelephoneNumber inherits String
+type MobileNumber inherits String
+
+type AddressLine1 inherits String
+type AddressLine2 inherits String
+type Town inherits String
+type Postcode inherits String
+type CountryCode inherits String
+type RegionCode inherits String
+
+[[ Kept distinct because SAP ANRED is a code, not Adobe title display text. ]]
+type SapTitleCode inherits String
+type SalesDistrictCode inherits String
+
+type CustomerAccountSchemaName inherits String
+type CustomerAccountEventType inherits String
+type CustomerAccountRoutingKey inherits String
+type IntegrationResultStatus inherits String

@@ -1,0 +1,29 @@
+import taxi.http.HttpHeader
+import taxi.http.HttpOperation
+import taxi.http.RequestBody
+
+import com.lalit.poc.adobe.AdobeCustomerAccount
+import com.lalit.poc.taxonomy.CustomerAccountAction
+import com.lalit.poc.taxonomy.CustomerAccountCausationId
+import com.lalit.poc.taxonomy.CustomerAccountCorrelationId
+import com.lalit.poc.taxonomy.CustomerAccountMessageId
+import com.lalit.poc.taxonomy.CustomerAccountOrigin
+
+namespace com.lalit.poc.queries
+
+[[
+  Phase 1 Adobe update ingress. Orbital projects the Adobe JSON facts into the
+  SAP XML model required by RabbitBridgeService before invoking POST /publish.
+]]
+@HttpOperation(url = "/api/q/customer-account/from-adobe", method = "POST")
+query adobeCustomerAccountToSap(
+   @RequestBody customer : AdobeCustomerAccount,
+   @HttpHeader(name = "X-Message-Id") messageId : CustomerAccountMessageId,
+   @HttpHeader(name = "X-Correlation-Id") correlationId : CustomerAccountCorrelationId,
+   @HttpHeader(name = "X-Causation-Id") causationId : CustomerAccountCausationId?,
+   @HttpHeader(name = "X-System-Origin") origin : CustomerAccountOrigin,
+   @HttpHeader(name = "X-Account-Action") action : CustomerAccountAction
+) {
+   given { customer, messageId, correlationId, causationId, origin, action }
+   call com.lalit.poc.services.RabbitBridgeService::publishCustomerAccountUpdate
+}

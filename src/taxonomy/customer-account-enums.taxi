@@ -1,0 +1,33 @@
+namespace com.lalit.poc.taxonomy
+
+enum CustomerAccountOrigin {
+   ADOBE("adobe"),
+   SAP("sap"),
+   FWT("fwt")
+}
+
+[[ Update is the only enabled Phase 1 action. ]]
+enum CustomerAccountAction {
+   UPDATE("UPDATE")
+}
+
+enum CustomerAccountStatus {
+   ACTIVE("ACTIVE"),
+   BLOCKED("BLOCKED"),
+   DEACTIVATED("DEACTIVATED"),
+   DECLINED("DECLINED"),
+   IN_PROCESS("IN_PROCESS"),
+   ON_HOLD("ON_HOLD")
+}
+
+enum CustomerContactPreference {
+   EMAIL_ONLY("EMAIL_ONLY"),
+   POST_ONLY("POST_ONLY"),
+   EMAIL_AND_POST("EMAIL_AND_POST"),
+   NONE("NONE")
+}
+
+enum CustomerCommunicationConsent {
+   ENABLED("ENABLED"),
+   DISABLED("DISABLED")
+}
