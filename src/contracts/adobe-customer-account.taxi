@@ -1,6 +1,8 @@
 import com.lalit.poc.taxonomy.AdobeCustomerId
+import com.lalit.poc.taxonomy.AddressLine
 import com.lalit.poc.taxonomy.AddressLine1
 import com.lalit.poc.taxonomy.AddressLine2
+import com.lalit.poc.taxonomy.CompanyName
 import com.lalit.poc.taxonomy.CountryCode
 import com.lalit.poc.taxonomy.CustomerAccountStatus
 import com.lalit.poc.taxonomy.CustomerContactPreference
@@ -9,14 +11,24 @@ import com.lalit.poc.taxonomy.CustomerDateOfBirth
 import com.lalit.poc.taxonomy.CustomerEmailAddress
 import com.lalit.poc.taxonomy.CustomerFirstName
 import com.lalit.poc.taxonomy.CustomerLastName
+import com.lalit.poc.taxonomy.DefaultBillingAddressFlag
+import com.lalit.poc.taxonomy.DefaultShippingAddressFlag
+import com.lalit.poc.taxonomy.FaxNumber
 import com.lalit.poc.taxonomy.MobileNumber
 import com.lalit.poc.taxonomy.Postcode
 import com.lalit.poc.taxonomy.RegionCode
+import com.lalit.poc.taxonomy.RegionName
 import com.lalit.poc.taxonomy.SapCustomerNumber
 import com.lalit.poc.taxonomy.TelephoneNumber
 import com.lalit.poc.taxonomy.Town
 
 namespace com.lalit.poc.adobe
+
+[[ Adobe-owned identifiers and extensibility keys are not shared business facts. ]]
+type AdobeAddressId inherits String
+type AdobeRegionId inherits Int
+type AdobeCustomAttributeCode inherits String
+type AdobeCustomAttributeValue inherits String
 
 enum AdobeCustomerAccountStatus {
    ACTIVE("ACTIVE") synonym of CustomerAccountStatus.ACTIVE,
@@ -28,7 +40,14 @@ enum AdobeCustomerAccountStatus {
 }
 
 [[ Adobe reads 1/0 on ingress but emits true/false on the reverse route. ]]
-enum AdobeCommunicationFlag {
+enum AdobeEmailCommunicationFlag {
+   ONE("1") synonym of CustomerCommunicationConsent.ENABLED,
+   TRUE("true") synonym of CustomerCommunicationConsent.ENABLED,
+   ZERO("0") synonym of CustomerCommunicationConsent.DISABLED,
+   FALSE("false") synonym of CustomerCommunicationConsent.DISABLED
+}
+
+enum AdobePostCommunicationFlag {
    ONE("1") synonym of CustomerCommunicationConsent.ENABLED,
    TRUE("true") synonym of CustomerCommunicationConsent.ENABLED,
    ZERO("0") synonym of CustomerCommunicationConsent.DISABLED,
@@ -36,33 +55,34 @@ enum AdobeCommunicationFlag {
 }
 
 closed model AdobeRegion {
-   region_code : String?
-   region : String?
-   region_id : Int?
+   region_code : RegionCode?
+   region : RegionName?
+   region_id : AdobeRegionId?
 }
 
 closed model AdobeAddress {
-   id : Int?
-   customer_id : String?
+   id : AdobeAddressId?
+   customer_id : AdobeCustomerId?
    region : AdobeRegion?
-   region_id : Int?
-   country_id : String
-   street : String[]
-   company : String?
-   telephone : String
-   alt_telephone : String?
-   fax : String?
-   postcode : String
-   city : String
-   firstname : String?
-   lastname : String?
-   default_shipping : Boolean?
-   default_billing : Boolean
+   region_id : AdobeRegionId?
+   country_id : CountryCode
+   street : AddressLine[]
+   company : CompanyName?
+   telephone : TelephoneNumber
+   alt_telephone : MobileNumber?
+   fax : FaxNumber?
+   postcode : Postcode
+   city : Town
+   firstname : CustomerFirstName?
+   lastname : CustomerLastName?
+   default_shipping : DefaultShippingAddressFlag?
+   default_billing : DefaultBillingAddressFlag
 }
 
 parameter closed model AdobeCustomAttribute {
-   attribute_code : String
-   value : Any
+   attribute_code : AdobeCustomAttributeCode
+   [[ BIP's Adobe customer-account contract carries custom-attribute values as strings. ]]
+   value : AdobeCustomAttributeValue
 }
 
 [[
@@ -80,12 +100,12 @@ closed model AdobeCustomerAccount {
 
    sapCustomerNumber : SapCustomerNumber by jsonPath("$.custom_attributes[?(@.attribute_code=='sap_unique_id')].value")
    accountStatus : AdobeCustomerAccountStatus by jsonPath("$.custom_attributes[?(@.attribute_code=='cellar_plan_status')].value")
-   allowEmailCommunication : AdobeCommunicationFlag by jsonPath("$.custom_attributes[?(@.attribute_code=='allow_email_communication')].value")
-   allowPostCommunication : AdobeCommunicationFlag by jsonPath("$.custom_attributes[?(@.attribute_code=='allow_post_communication')].value")
+   allowEmailCommunication : AdobeEmailCommunicationFlag by jsonPath("$.custom_attributes[?(@.attribute_code=='allow_email_communication')].value")
+   allowPostCommunication : AdobePostCommunicationFlag by jsonPath("$.custom_attributes[?(@.attribute_code=='allow_post_communication')].value")
    contactPreference : CustomerContactPreference by when {
-      (this.allowEmailCommunication == AdobeCommunicationFlag.ONE || this.allowEmailCommunication == AdobeCommunicationFlag.TRUE) && (this.allowPostCommunication == AdobeCommunicationFlag.ONE || this.allowPostCommunication == AdobeCommunicationFlag.TRUE) -> CustomerContactPreference.EMAIL_AND_POST
-      this.allowEmailCommunication == AdobeCommunicationFlag.ONE || this.allowEmailCommunication == AdobeCommunicationFlag.TRUE -> CustomerContactPreference.EMAIL_ONLY
-      this.allowPostCommunication == AdobeCommunicationFlag.ONE || this.allowPostCommunication == AdobeCommunicationFlag.TRUE -> CustomerContactPreference.POST_ONLY
+      (this.allowEmailCommunication == AdobeEmailCommunicationFlag.ONE || this.allowEmailCommunication == AdobeEmailCommunicationFlag.TRUE) && (this.allowPostCommunication == AdobePostCommunicationFlag.ONE || this.allowPostCommunication == AdobePostCommunicationFlag.TRUE) -> CustomerContactPreference.EMAIL_AND_POST
+      this.allowEmailCommunication == AdobeEmailCommunicationFlag.ONE || this.allowEmailCommunication == AdobeEmailCommunicationFlag.TRUE -> CustomerContactPreference.EMAIL_ONLY
+      this.allowPostCommunication == AdobePostCommunicationFlag.ONE || this.allowPostCommunication == AdobePostCommunicationFlag.TRUE -> CustomerContactPreference.POST_ONLY
       else -> CustomerContactPreference.NONE
    }
 
@@ -106,15 +126,15 @@ parameter closed model AdobeWriteRegion {
 parameter closed model AdobeWriteAddress {
    region : AdobeWriteRegion?
    country_id : CountryCode
-   street : String[] by [AddressLine1, AddressLine2]
+   street : AddressLine[] by [AddressLine1, AddressLine2]
    telephone : TelephoneNumber
    alt_telephone : MobileNumber?
    postcode : Postcode
    city : Town
    firstname : CustomerFirstName
    lastname : CustomerLastName
-   default_shipping : Boolean by true
-   default_billing : Boolean by true
+   default_shipping : DefaultShippingAddressFlag by true
+   default_billing : DefaultBillingAddressFlag by true
 }
 
 [[ Exact Adobe PUT body shape: { "customer": { ... } }. ]]
@@ -138,18 +158,18 @@ parameter closed model AdobeCustomerWriteAccount {
       default_billing : true
    }]
    custom_attributes : AdobeCustomAttribute[] by [
-      { attribute_code : "sap_unique_id", value : SapCustomerNumber },
-      { attribute_code : "cellar_plan_status", value : AdobeCustomerAccountStatus },
+      { attribute_code : "sap_unique_id", value : (AdobeCustomAttributeValue) SapCustomerNumber },
+      { attribute_code : "cellar_plan_status", value : (AdobeCustomAttributeValue) AdobeCustomerAccountStatus },
       {
          attribute_code : "allow_email_communication",
-         value : when {
+         value : (AdobeCustomAttributeValue) when {
             CustomerContactPreference == CustomerContactPreference.EMAIL_ONLY || CustomerContactPreference == CustomerContactPreference.EMAIL_AND_POST -> "true"
             else -> "false"
          }
       },
       {
          attribute_code : "allow_post_communication",
-         value : when {
+         value : (AdobeCustomAttributeValue) when {
             CustomerContactPreference == CustomerContactPreference.POST_ONLY || CustomerContactPreference == CustomerContactPreference.EMAIL_AND_POST -> "true"
             else -> "false"
          }

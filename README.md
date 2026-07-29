@@ -14,12 +14,12 @@ This is the authoritative continuation point. The design sections below still de
 
 | Area | Implemented and verified | Still required |
 |---|---|---|
-| Taxi project | Reusable customer-account taxonomy and enums; independent Adobe JSON and SAP XML contracts; HTTP services; `from-adobe` and `from-sap` saved queries; config and Nebula additional sources. Orbital generation 21 loaded with both routes and no schema errors. | Add explicit reverse-route `KTOKD=1` handling and independently assert that `MSGFN`, action metadata, and the enabled update-only behavior agree. |
+| Taxi project | Reusable customer-account taxonomy and enums; independent Adobe JSON and SAP XML contracts; HTTP services; `from-adobe` and `from-sap` saved queries; config and Nebula additional sources. The Phase 1 contracts now use shared or system-owned semantic types for every model field. Taxi 1.72 compiles them with `0` errors and `0` warnings; Orbital's post-cleanup reload registered both routes, and the package endpoint reports Healthy with 8 sources, 0 errors, and 0 warnings. | Add explicit reverse-route `KTOKD=1` handling and independently assert that `MSGFN`, action metadata, and the enabled update-only behavior agree. |
 | RabbitMQ | Durable topic exchange, two directional queues, DLX, two DLQs, positive bindings, `poc` vhost, definitions import, and persistent storage. Topology creation, route isolation, DLQ routing, and restart persistence were exercised. | FWT queue/binding/DLQ are Phase 2. Retry queues and replay tooling are not designed. |
-| `rabbit-bridge` | HTTP publisher with mandatory routing and publisher confirms; AMQP consumer with `prefetch=1`, metadata validation, manual acknowledgement, and reject-without-requeue on failure; health endpoint and reconnect state. | Add a durable idempotency store and a deliberate retry policy only after the semantic POC. |
+| `rabbit-bridge` | HTTP publisher with mandatory routing and publisher confirms; AMQP consumer with `prefetch=1`, metadata validation, manual acknowledgement, and reject-without-requeue on failure; health endpoint and reconnect state. | Reconnect and retry once within the same request when RabbitMQ has closed an idle publisher connection. Then add a durable idempotency store and deliberate retry policy after the semantic POC. |
 | Adobe → SAP | The Adobe fixture invokes Orbital, Taxi projects the semantic facts, the bridge publishes persistent `application/xml`, and the queued `ZBUPA_CBO` body matches `expected-sap-update.xml` semantically. Routing key and lineage/type/schema metadata were checked. | Automate the live fixture assertion and complete the missing-ID and wrong-origin acceptance cases. |
 | SAP → Adobe | A persistent SAP XML event published as `customer-account.sap.updated` is consumed by the bridge, projected by Orbital, sent as a `PUT` to the Nebula Adobe stub, and acknowledged. The captured body matches the expected address and custom-attribute structure, including leading zeroes in `00010001`. | Add the non-individual-account skip policy and live malformed-XML/Adobe-500 DLQ evidence. |
-| Verification | `25` bridge tests pass; Python byte-compilation and Ruff pass; both Compose models validate; Orbital, RabbitMQ, Nebula, Postgres, and the bridge are running; bridge consumer health is connected. | Add automated end-to-end tests for every status/preference permutation, optional second address line, title/date behavior, and a stored round-trip comparison report. |
+| Verification | Taxi compilation is `0` errors / `0` warnings with 0 saved-query errors; `25` bridge tests, Python byte-compilation, and Ruff pass; both Compose models validate. Both live fixture directions passed again after the semantic cleanup: SAP XML and Adobe JSON matched their expected fixtures exactly, leading zeroes and SAP enum wire values were preserved, the reverse delivery was acknowledged, and its DLQ remained empty. | Automate the two live fixture assertions; cover every status/preference permutation, optional second address line, title/date behavior, negative/failure cases, and a stored round-trip comparison report. |
 | FWT | Nothing implemented. | Start Phase 2 only after the remaining Phase 1 gate items pass. |
 
 The core update path works in both directions, but the complete Phase 1 exit gate has **not** passed because the business guards and negative/failure acceptance cases above remain.
@@ -63,7 +63,9 @@ python -m compileall -q app tests
 python -m ruff check app tests
 ```
 
-There is no Taxi CLI installed on this machine. The current Taxi validation evidence is Orbital's clean source reload plus successful execution of both saved-query routes. When stopping the POC, omit `-v` to retain the Rabbit volume:
+There is no Taxi CLI installed on this machine. The Taxi 1.72 compiler bundled in the same Orbital image was run directly against all `src/**/*.taxi` files plus the XML annotation source: it reported `0` errors, `0` warnings, and `0` saved-query errors. Orbital's package endpoint independently reports this package as Healthy with 8 sources and no package diagnostics. The combined Orbital schema log still mentions two warnings; `/api/schemas/taxi` attributes both to the bundled `com.orbitalhq/core-types` `MongoDbConnector.collection` field, not to this POC package.
+
+When stopping the POC, omit `-v` to retain the Rabbit volume:
 
 ```powershell
 Set-Location C:\dev\bbnr\orbital
@@ -244,8 +246,8 @@ Taxi types are the reusable vocabulary; models remain owned by the system whose 
 | Lineage | `CustomerAccountMessageId`, `CustomerAccountCorrelationId`, `CustomerAccountCausationId`, `CustomerAccountOrigin`, `CustomerAccountAction` | Required transport facts; they are not customer payload fields. |
 | Identity | `AdobeCustomerId`, `SapCustomerNumber` | Distinct concepts. Both inherit `String`; neither is an alias of the other. |
 | Person | `CustomerFirstName`, `CustomerLastName`, `CustomerTitle`, `CustomerDateOfBirth` | Title display text and SAP title code remain separate representations. |
-| Contact | `CustomerEmailAddress`, `TelephoneNumber`, `MobileNumber` | Shared meanings across all three contracts. |
-| Address | `AddressLine1`, `AddressLine2`, `Town`, `Postcode`, `CountryCode`, `RegionCode` | Do not give Adobe numeric `region_id` the `RegionCode` type. |
+| Contact | `CustomerEmailAddress`, `TelephoneNumber`, `MobileNumber`, `FaxNumber` | Shared meanings across all three contracts. |
+| Address | `AddressLine`, `AddressLine1`, `AddressLine2`, `Town`, `Postcode`, `CountryCode`, `RegionCode`, `RegionName`, `CompanyName`, `DefaultShippingAddressFlag`, `DefaultBillingAddressFlag` | Positional address lines and independent shipping/billing facts remain distinguishable. Do not give Adobe numeric `region_id` the `RegionCode` type. |
 | Account | `CustomerAccountStatus`, `CustomerContactPreference`, `SalesDistrictCode` | Wire codes are mapped using enums or explicit lookup operations. |
 | Money, later | `CustomerBalanceAmount`, `CreditLimitAmount`, `MonthlyPaymentAmount`, `CurrencyCode` | Add after the core round trip. |
 | Bank, later | `BankAccountNumber`, `AccountHolderName`, `Iban`, `Bic`, `BankCountryCode`, `BankValidFrom`, `BankValidTo` | Add as one parity slice, not field by field. |
@@ -264,6 +266,10 @@ Define independent models composed from the shared types:
 - `sap.ZbupaCustomerCoreSegment`
 - `sap.ZbupaCustomerSecondarySegment`
 - `fwt.FwtCustomerAccount` in Phase 2
+
+Adobe wire-only concepts use `AdobeAddressId`, `AdobeRegionId`, `AdobeCustomAttributeCode`, and `AdobeCustomAttributeValue`. `AdobeAddressId` and custom-attribute values inherit `String`, matching BIP's `AccountCreation.cs` contract. The Phase 1 custom-attribute carrier is deliberately not `Any`: the replicated BIP contract is string-valued, and keeping it typed avoids hiding legitimate primitive-field warnings project-wide.
+
+SAP wire/protocol concepts stay in the SAP namespace: IDoc segment/begin indicators, control-record table/client/release/type/sender fields, `SapIdocDirection`, `SapCustomerAccountGroup`, `SapCustomerAccountType`, and the opaque `SapCustomerGroupCode`. The account-group and account-type enum values come from BIP's `customerMaps.txt`; transport constants such as client `100` remain system-owned rather than reusable customer facts.
 
 Keep routing metadata as typed saved-query parameters, so each request body remains the real system wire format:
 
@@ -304,12 +310,17 @@ Represent business meanings independently from source codes:
 | Post only | email=false, post=true | `PST` |
 | Email and post | email=true, post=true | `PEM` |
 | Neither | email=false, post=false | `NON` |
+| IDoc direction | not applicable | inbound `DIRECT=2` |
+| Individual account group | implicit in this Adobe slice | `KTOKD=1` |
+| Retail account type | not exposed by this Adobe slice | `KATR1=01` |
 
 Use Taxi enum synonyms where the mapping is closed and genuinely bidirectional. Use an explicit lookup source for reference data such as title and sales district, where BIP currently reads Azure Table `refData`. The first slice can use a small deterministic local lookup fixture.
 
+Email and post communication use separate Adobe enums even though their wire values are both `1`/`0` or `true`/`false`: they are independent facts. Both synonym-map to the shared consent meaning. SAP `DIRECT`, `KTOKD`, and `KATR1` use enums so their defaults are named and still serialize as the required wire codes.
+
 Do not reproduce these BIP asymmetries silently:
 
-- SAP → Adobe emits contact flags as the strings `"true"`/`"false"`, while Adobe → SAP currently checks `"1"`/`"0"`. Model booleans semantically and translate each wire form.
+- SAP → Adobe emits contact flags as the strings `"true"`/`"false"`, while Adobe → SAP currently checks `"1"`/`"0"`. Model email and post as separate semantic enums and translate each wire form.
 - SAP → Adobe exposes raw `ANRED` in one Adobe custom attribute, while Adobe → SAP expects a display title for its lookup. Keep `SapTitleCode` and `CustomerTitle` separate.
 - SAP `REGIO` is a region code; Adobe's `region_id` is numeric. They are not the same type.
 - Adobe root `id` and custom attribute `sap_unique_id` are not interchangeable identities.
@@ -530,9 +541,10 @@ Status: **complete for the Phase 1 field slice**.
 - Add distinct Adobe and SAP IDs.
 - Add typed saved-query inputs for message, correlation, causation, origin, action, and the temporary Adobe identity parameter.
 - Add synthetic paired fixtures with stable values and no PII.
-- Validate through Orbital's source loader until the project reloads with no schema errors; install a Taxi CLI later if a standalone build is required.
+- Replace primitive model fields with shared business types or system-owned wire/protocol types; keep email and post flags distinct to avoid ambiguous same-type facts.
+- Validate with Taxi 1.72 (`0` errors, `0` warnings, `0` saved-query errors), Orbital package health, and both live fixture directions.
 
-Exit: the taxonomy builds, and no contract field that participates in the core mapping is typed as a bare `String`, `Int`, or `Boolean` when a business meaning is known.
+Exit: **passed for the Phase 1 contracts.** No model field is typed as a bare `String`, `Int`, `Boolean`, or `Any`; the live outputs still match `expected-sap-update.xml` and `expected-adobe-update.json`.
 
 ### 2. Add RabbitMQ and the transport bridge
 
@@ -631,6 +643,7 @@ Status: **not started**, except that publisher confirms and basic health/logging
 - Replace local reference fixtures with an authoritative source.
 - Add the remaining money, bank, partner, and custom-attribute fields.
 - Add a durable idempotency store keyed by `route + message_id`.
+- Reconnect and retry one publish when RabbitMQ closes a stale idle publisher connection; the current bridge resets it only after returning the first `503`, so a second request succeeds.
 - Design retry queues, ordering rules, replay tooling, publisher confirms, and observability.
 - Evaluate replacing the bridge if a supported RabbitMQ connector is supplied for the deployed Orbital edition.
 - Re-evaluate whether FWT should accept both Adobe- and SAP-origin events.

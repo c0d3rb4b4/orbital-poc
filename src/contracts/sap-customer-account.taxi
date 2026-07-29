@@ -21,6 +21,34 @@ import com.lalit.poc.taxonomy.Town
 
 namespace com.lalit.poc.sap
 
+[[ SAP IDoc control-record concepts stay in the SAP-owned contract namespace. ]]
+type SapIdocSegmentIndicator inherits String
+type SapIdocBeginIndicator inherits String
+type SapIdocControlRecordTableName inherits String
+type SapClientNumber inherits String
+type SapIdocRelease inherits String
+type SapIdocBasicTypeName inherits String
+type SapIdocMessageTypeName inherits String
+type SapSenderPartnerType inherits String
+type SapSenderPartnerNumber inherits String
+type SapCustomerGroupCode inherits String
+
+enum SapIdocDirection {
+   OUTBOUND("1"),
+   INBOUND("2")
+}
+
+enum SapCustomerAccountGroup {
+   INDIVIDUAL("1"),
+   ORGANISATION("2")
+}
+
+enum SapCustomerAccountType {
+   RETAIL("01"),
+   WHOLESALE("02"),
+   WINE_CLUB("03")
+}
+
 enum SapMessageFunction {
    UPDATE("004") synonym of CustomerAccountAction.UPDATE
 }
@@ -42,21 +70,21 @@ enum SapContactPreference {
 }
 
 parameter closed model ZbupaControlRecord {
-   @XmlAttribute SEGMENT : String by "1"
-   TABNAM : String by "EDI_DC40"
-   MANDT : String by "100"
-   DOCREL : String by "751"
-   DIRECT : String by "2"
-   IDOCTYP : String by "ZBUPA_CBO"
-   MESTYP : String by "ZBUPA_HYBRIS_IN"
-   SNDPRT : String by "LS"
-   SNDPRN : String by "BIP"
+   @XmlAttribute SEGMENT : SapIdocSegmentIndicator by "1"
+   TABNAM : SapIdocControlRecordTableName by "EDI_DC40"
+   MANDT : SapClientNumber by "100"
+   DOCREL : SapIdocRelease by "751"
+   DIRECT : SapIdocDirection by SapIdocDirection.INBOUND
+   IDOCTYP : SapIdocBasicTypeName by "ZBUPA_CBO"
+   MESTYP : SapIdocMessageTypeName by "ZBUPA_HYBRIS_IN"
+   SNDPRT : SapSenderPartnerType by "LS"
+   SNDPRN : SapSenderPartnerNumber by "BIP"
 }
 
 parameter closed model ZbupaCustomerCoreSegment {
-   @XmlAttribute SEGMENT : String by "1"
+   @XmlAttribute SEGMENT : SapIdocSegmentIndicator by "1"
    MSGFN : SapMessageFunction
-   KTOKD : String by "1"
+   KTOKD : SapCustomerAccountGroup by SapCustomerAccountGroup.INDIVIDUAL
    KUNNR : SapCustomerNumber
    ANRED : SapTitleCode?
    NAME1 : CustomerFirstName
@@ -73,16 +101,16 @@ parameter closed model ZbupaCustomerCoreSegment {
 }
 
 parameter closed model ZbupaCustomerSecondarySegment {
-   @XmlAttribute SEGMENT : String by "1"
-   KDGRP : String by "02"
-   KATR1 : String by "01"
+   @XmlAttribute SEGMENT : SapIdocSegmentIndicator by "1"
+   KDGRP : SapCustomerGroupCode by "02"
+   KATR1 : SapCustomerAccountType by SapCustomerAccountType.RETAIL
    KATR5 : SapCustomerAccountStatus
    KATR10 : SapContactPreference
    MOB_NUMBER : MobileNumber?
 }
 
 parameter closed model ZbupaCustomerAccountDocument {
-   @XmlAttribute BEGIN : String by "1"
+   @XmlAttribute BEGIN : SapIdocBeginIndicator by "1"
    EDI_DC40 : ZbupaControlRecord
    ZBP_CBO : ZbupaCustomerCoreSegment
    ZBP_CBO2 : ZbupaCustomerSecondarySegment

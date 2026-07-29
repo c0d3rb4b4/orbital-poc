@@ -19,13 +19,22 @@ type CustomerDateOfBirth inherits String
 type CustomerEmailAddress inherits String
 type TelephoneNumber inherits String
 type MobileNumber inherits String
+type FaxNumber inherits String
 
-type AddressLine1 inherits String
-type AddressLine2 inherits String
+[[ A positional line in a postal address. ]]
+type AddressLine inherits String
+type AddressLine1 inherits AddressLine
+type AddressLine2 inherits AddressLine
 type Town inherits String
 type Postcode inherits String
 type CountryCode inherits String
 type RegionCode inherits String
+type RegionName inherits String
+type CompanyName inherits String
+
+[[ Address-role flags are distinct facts even though both use Boolean on the wire. ]]
+type DefaultShippingAddressFlag inherits Boolean
+type DefaultBillingAddressFlag inherits Boolean
 
 [[ Kept distinct because SAP ANRED is a code, not Adobe title display text. ]]
 type SapTitleCode inherits String
