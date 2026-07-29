@@ -1,540 +1,789 @@
-# Customer Account Adobe ↔ SAP + FWT (RabbitMQ) Orbital POC
+# Orbital Customer Account Integration POC
 
-Status: Adobe ↔ SAP and both Adobe/SAP → FWT update paths are implemented end to end; acceptance hardening and full FWT parity remain
+This repository is an end-to-end Orbital/Taxi proof of concept for customer-account integration between Adobe, SAP, and FWT. RabbitMQ replaces the production message broker and the SAP boundary, while Nebula replaces the real Adobe and FWT HTTP endpoints.
 
-Last verified: 2026-07-29
+The implemented paths are:
 
-Target repository: `orbital-poc`
-
-Reference implementation: `../bip`
-
-## Implementation checkpoint
-
-This is the authoritative continuation point. The design sections below still describe the intended complete POC, while this section records the code and evidence that exist now.
-
-| Area | Implemented and verified | Still required |
+| Source event | RabbitMQ subscriptions | Result |
 |---|---|---|
-| Taxi project | Reusable customer-account taxonomy and enums; independent Adobe JSON, SAP XML, and FWT JSON contracts; three HTTP services; and `from-adobe`, `from-sap`, and `to-fwt` saved queries. Account status, type, group, action, contact preference, identity, person, address, and contact facts are reused without sharing a physical wire model. Orbital reports the package Healthy with 11 Taxi sources, 0 errors, and 0 warnings. | Add explicit reverse-route `KTOKD=1` handling and independently assert that `MSGFN`, action metadata, and the enabled update-only behavior agree. Add the deferred FWT parity slices only when their authoritative data is defined. |
-| RabbitMQ | Durable topic exchange, four main queues, DLX, four route-specific DLQs, eight bindings, `poc` vhost, definitions import, and persistent storage. The two new business queues are `adobe-to-fwt` and `sap-to-fwt`; each has a supporting DLQ. All three active consumers are connected. | Retry queues and replay tooling are not designed. |
-| `rabbit-bridge` | HTTP publisher with mandatory routing and publisher confirms; reusable one-queue-per-process AMQP consumer with configurable queue, routing pattern, expected origin, Adobe-ID policy, target path, and XML/JSON transport format; `prefetch=1`, metadata validation, manual acknowledgement, reject-without-requeue, health, and reconnect state. The two FWT workers structurally convert SAP XML to its equivalent IDoc JSON envelope before calling Orbital; no customer values are mapped in Python. | Reconnect and retry once within the same request when RabbitMQ has closed an idle publisher connection. Then add a durable idempotency store and deliberate retry policy after the semantic POC. |
-| Adobe → SAP | The Adobe fixture invokes Orbital, Taxi projects the semantic facts, the bridge publishes persistent `application/xml`, and the queued `ZBUPA_CBO` body matches `expected-sap-update.xml` semantically. Routing key and lineage/type/schema metadata were checked. | Automate the live fixture assertion and complete the missing-ID and wrong-origin acceptance cases. |
-| SAP → Adobe | A persistent SAP XML event published as `customer-account.sap.updated` is consumed by the bridge, projected by Orbital, sent as a `PUT` to the Nebula Adobe stub, and acknowledged. The captured body matches the expected address and custom-attribute structure, including leading zeroes in `00010001`. | Add the non-individual-account skip policy and live malformed-XML/Adobe-500 DLQ evidence. |
-| FWT | `FwtCustomerAccount`, nested first-slice models, FWT wire enums, deterministic display-name/date/preference projections, `FwtCustomerService`, `to-fwt`, the Nebula `POST /customer-accounts` stub, expected JSON fixture, two Rabbit workers, and both source-origin routes are implemented. Live Adobe- and SAP-origin deliveries each matched `expected-fwt-update.json` exactly and were acknowledged. | Full BIP FWT parity still excludes timestamps, reference descriptions, money, banks, partner data, most flags, and additional properties. Decide how to suppress duplicate business effects when an Adobe event and its later SAP confirmation describe the same change. |
-| Verification | Orbital package health is Healthy with 0 errors / 0 warnings; `41` bridge tests, Python byte-compilation, and Ruff pass; both Compose models validate. RabbitMQ imported 8 queues and 8 bindings. Live Adobe → FWT and SAP → FWT bodies matched the expected fixture exactly, SAP fan-out also produced the existing Adobe call, leading-zero IDs were preserved, and all active deliveries were acknowledged. | Turn the manual live assertions into a checked-in integration test; cover every enum/optional-field permutation and the remaining negative/failure cases. |
+| Adobe update | `adobe-to-sap` and `adobe-to-fwt` | A SAP `ZBUPA_CBO` IDoc is retained in the simulated SAP inbox; an independent copy is projected and posted to FWT. |
+| SAP update | `sap-to-adobe` and `sap-to-fwt` | Independent copies are projected and written to the Adobe and FWT stubs. |
+| FWT event | None | No FWT-origin route exists. FWT is an outbound target only. |
 
-The core Adobe ↔ SAP and Adobe/SAP → FWT update paths work, but the complete production-readiness gates have **not** passed because the business guards, duplicate policy, full FWT parity, automated live assertions, and negative/failure cases above remain.
+The POC is update-only, uses synthetic customer data, and keeps business transformation in Taxi. The Python bridge performs transport and structural format adaptation only.
 
-### Resume the isolated POC stack
+Current verification snapshot:
 
-The POC uses a separate Compose project and non-conflicting host ports, so it does not replace the unrelated `orbital-*` stack:
+- Orbital package `com.lalit/orbital-poc` is Healthy with 11 Taxi sources, 0 warnings, and 0 errors.
+- The Python bridge has 41 passing tests; Ruff and Python byte-compilation pass.
+- Adobe-origin and SAP-origin FWT writes match `test-data/expected-fwt-update.json`.
+- SAP-origin Adobe writes match `test-data/expected-adobe-update.json`.
+- Adobe-origin SAP XML matches `test-data/expected-sap-update.xml` semantically.
+- Both development Compose models validate; in the isolated development stack all three consumers connect, and the four main queues have independent dead-letter queues.
 
-```powershell
-Set-Location C:\dev\bbnr\orbital
-docker compose -p orbital-poc -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.poc.yml up -d --build --wait postgres rabbitmq nebula orbital rabbit-bridge rabbit-bridge-adobe-to-fwt rabbit-bridge-sap-to-fwt
-```
+## Contents
 
-At the end of the 2026-07-29 implementation pass this isolated stack was intentionally left running. All four main queues and four DLQs were empty after the fixture messages were inspected, acknowledged, or removed.
+- [Purpose and scope](#purpose-and-scope)
+- [Architecture](#architecture)
+- [Why Taxi, the Python bridge, RabbitMQ, and Nebula exist](#why-taxi-the-python-bridge-rabbitmq-and-nebula-exist)
+- [Taxi semantic modelling](#taxi-semantic-modelling)
+- [RabbitMQ topology](#rabbitmq-topology)
+- [End-to-end flow diagrams](#end-to-end-flow-diagrams)
+- [Detailed sequence diagrams](#detailed-sequence-diagrams)
+- [HTTP and message contracts](#http-and-message-contracts)
+- [Delivery, failure, and loop-prevention semantics](#delivery-failure-and-loop-prevention-semantics)
+- [Repository layout and file-by-file reference](#repository-layout-and-file-by-file-reference)
+- [Runtime configuration](#runtime-configuration)
+- [Run the POC locally](#run-the-poc-locally)
+- [Deploy to the existing Git-workspace Orbital instance](#deploy-to-the-existing-git-workspace-orbital-instance)
+- [Smoke tests](#smoke-tests)
+- [Automated tests](#automated-tests)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations and continuation work](#known-limitations-and-continuation-work)
+- [How to extend the POC safely](#how-to-extend-the-poc-safely)
+- [BIP traceability](#bip-traceability)
 
-| Service | Host endpoint |
-|---|---|
-| Orbital | `http://localhost:19022` |
-| Rabbit bridge | `http://localhost:18080/health` |
-| RabbitMQ AMQP | `localhost:25672` |
-| RabbitMQ management | `http://localhost:25673` |
-| Nebula control service | `http://localhost:18099` |
-| Postgres | `localhost:35432` |
-| Prometheus, when started | `http://localhost:19090` |
+## Purpose and scope
 
-The local RabbitMQ demo credentials are `orbital` / `orbital-poc` on vhost `poc`. They are intentionally fixed in the Compose override and definitions file; they are not production credentials.
+The POC demonstrates that reusable Taxi data definitions can connect three different system-owned wire contracts without creating a single shared physical customer model.
 
-Useful continuation commands:
+It proves the following design:
 
-```powershell
-Set-Location C:\dev\bbnr\orbital
-docker compose -p orbital-poc -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.poc.yml ps
-docker compose -p orbital-poc -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.poc.yml logs -f orbital rabbit-bridge rabbit-bridge-adobe-to-fwt rabbit-bridge-sap-to-fwt nebula rabbitmq
-```
+1. Adobe JSON enters an Orbital saved query.
+2. Taxi exposes the reusable customer facts inside the Adobe payload and projects them into a SAP IDoc model.
+3. Orbital calls the Python bridge over HTTP; the bridge serializes the already-projected IDoc as XML and publishes it to RabbitMQ.
+4. RabbitMQ fans the event out to independent target subscriptions.
+5. Queue-specific bridge workers validate the message, call an Orbital saved query, and acknowledge only after the target write succeeds.
+6. Taxi projects the SAP facts into independent Adobe or FWT target contracts.
+7. Nebula captures the final HTTP writes so the exact target payload can be inspected without external credentials or side effects.
 
-Run the bridge checks from `C:\dev\bbnr\orbital-poc\rabbit-bridge`:
+### What is real in this POC
 
-```powershell
-python -m pytest -q
-python -m compileall -q app tests
-python -m ruff check app tests
-```
+- The Adobe, SAP, and FWT wire shapes used by the selected field slice.
+- Taxi semantic types, enum synonyms, projections, saved queries, and HTTP write operations.
+- RabbitMQ topic routing, persistent messages, publisher confirms, manual acknowledgements, and dead-lettering.
+- HTTP-to-AMQP and AMQP-to-HTTP transport through the Python bridge.
+- Docker networking and the Orbital disk-workspace loading model.
+- Deterministic synthetic fixtures and exact expected target payloads.
 
-There is no Taxi CLI installed on this machine. Orbital's bundled Taxi compiler loaded all 11 `src/**/*.taxi` sources and registered all three saved-query routes. `GET /api/packages` reports `com.lalit/orbital-poc` as Healthy with 0 errors and 0 warnings.
+### What is simulated
 
-When stopping the POC, omit `-v` to retain the Rabbit volume:
+- The SAP target is the durable `poc.customer-account.adobe-to-sap` queue. It intentionally has no consumer in this POC.
+- A SAP return/update is injected explicitly from `test-data/sap-update.xml`; the simulated SAP inbox does not automatically echo a response.
+- Adobe and FWT are Nebula HTTP stubs that log requests and return deterministic success responses.
+- The RabbitMQ management publish API is used only as a manual SAP smoke-test injector.
 
-```powershell
-Set-Location C:\dev\bbnr\orbital
-docker compose -p orbital-poc -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.poc.yml down
-```
+### What is deliberately out of scope
 
-### Continue Phase 1 in this order
+- Production Adobe, SAP, FWT, Azure Service Bus, or reference-data connectivity.
+- Create flows. Only `UPDATE` / SAP `MSGFN=004` is enabled.
+- Exactly-once delivery, durable idempotency, automatic retry queues, replay tooling, ordering guarantees, HA, TLS, and production authentication.
+- Full FWT canonical-account parity.
+- A FWT-origin customer-account on-ramp or return flow.
 
-1. Implement and test a visible `KTOKD != 1` handled-skip outcome on SAP ingress. Decide whether inconsistent `MSGFN=004`/action metadata is rejected by the bridge or by the query, then test it.
-2. Turn the manual fixture runs into repeatable assertions, including exact target path/body, AMQP properties, acknowledgement, queue counts, and zero echo deliveries.
-3. Complete A2/A3, S2/S3, Q1/Q2, R1, and R3 in the acceptance table. The current consumer has no retry stage: invalid metadata or any downstream non-2xx is immediately rejected without requeue and dead-lettered.
-4. Exercise all status/contact-preference mappings, absent optional line 2/mobile/region, title/date behavior, and leading-zero IDs in both projections.
-5. Capture a concise automated semantic round-trip report. Keep the implemented FWT slice green while completing the remaining Phase 1 and FWT-parity items.
+## Architecture
 
-## Decision
-
-Replicate the BIP customer-account integration as two controlled Orbital flows, with RabbitMQ acting as the SAP boundary:
-
-1. Adobe customer JSON → Taxi transformation → SAP `ZBUPA_CBO` XML IDoc → RabbitMQ SAP inbox.
-2. SAP `ZBUPA_CBO` XML IDoc published to RabbitMQ → Taxi transformation → Adobe customer JSON.
-
-The implemented slice is update-only and uses individual-customer fixtures. FWT is a one-way target for both Adobe- and SAP-origin events, matching the production BIP subscription scope; no FWT-origin return flow is invented.
-
-This is a strong Taxi POC because the system contracts are different, while the underlying business facts—customer number, name, email, address, status, preferences, and balances—can share semantic types. It also demonstrates JSON/XML conversion, enum/reference-data translation, and asynchronous topic/subscription routing without requiring a real SAP or Azure Service Bus environment.
-
-The disposable `src/users.taxi` example has been removed and replaced by the customer-account project described here.
-
-## Outcome
-
-The current POC proves that Orbital can:
-
-- accept an Adobe-shaped customer update and publish the corresponding SAP IDoc to a RabbitMQ queue representing the SAP inbox;
-- consume a SAP customer IDoc from a RabbitMQ subscription and write the corresponding Adobe request;
-- reuse the same Taxi semantic types in independent Adobe, SAP, and FWT models;
-- preserve source-specific wire contracts rather than introducing one shared physical model;
-- translate action and status codes explicitly;
-- prevent a message from being routed back to its origin through positive RabbitMQ bindings and metadata validation;
-- prove RabbitMQ fan-out by delivering Adobe-origin and SAP-origin events to independent FWT queues without changing the Adobe consumer;
-- add the FWT model without remodelling the Adobe and SAP contracts.
-
-It proves semantic equivalence for the selected fields. It does not claim byte-for-byte round-trip equivalence or full FWT model parity because each system has fields and representations that the others do not preserve.
-
-## Scope
-
-### Phase 1: Adobe ↔ SAP core
-
-Included:
-
-- update only: Adobe update ↔ SAP `MSGFN=004`;
-- individual customer accounts only: SAP `KTOKD=1`;
-- synthetic fixtures with no personal or bank data;
-- core identity, name, contact, address, date-of-birth, status, and contact-preference fields;
-- Adobe JSON and SAP XML wire formats;
-- a local RabbitMQ topic exchange, durable subscription queues, and dead-letter queues;
-- a thin HTTP/AMQP bridge with no business transformations;
-- an Adobe HTTP stub with captured requests;
-- a message ID, origin, and action on every POC invocation;
-- explicit route guards and deterministic assertions.
-
-Deferred from the first working slice:
-
-- account creation (`POST` / SAP `MSGFN=009`);
-- real Adobe, SAP, Azure Service Bus, or Azure Table connections;
-- automated retry queues, production ordering guarantees, durable idempotency, and production authentication;
-- the complete financial, bank, partner, and custom-attribute model;
-- Creatio and prospective-customer routes;
-- FWT writes (implemented below as Phase 2).
-
-### Phase 2: FWT core
-
-The first FWT parity slice is implemented as two independent RabbitMQ subscriptions feeding one reusable outbound projection:
-
-```text
-Adobe-origin customer change → poc.customer-account.adobe-to-fwt ┐
-                                                                  ├→ Orbital Taxi projection
-SAP-origin customer change   → poc.customer-account.sap-to-fwt   ┘
-  → FWT POST /customer-accounts
-```
-
-FWT is not a return leg. BIP contains a FWT customer-account off-ramp but no corresponding FWT customer-account on-ramp.
-
-The POC now matches the relevant production filter by accepting both Adobe- and SAP-origin IDoc events. The two main queues requested for FWT are `poc.customer-account.adobe-to-fwt` and `poc.customer-account.sap-to-fwt`; each has its own `.dlq`. There is deliberately no `fwt-to-*` queue, binding, publisher, or saved query.
-
-This policy can produce two FWT `POST`s for one business change when an Adobe-origin update is followed by its separately published SAP confirmation. That is BIP-parity fan-out, not a message loop. Production rollout still needs a business-level idempotency/deduplication decision if only one target effect is desired.
-
-In this POC, “SAP-confirmed” means a separate IDoc fixture explicitly published with routing key `customer-account.sap.updated`, a new message ID, and correlation/causation metadata linking it to the Adobe-origin event. Arrival in the fake SAP inbox alone is not confirmation.
-
-## Production flow being replicated
-
-### Adobe → SAP
-
-```text
-Adobe HTTP customer payload
-  → la-bip-adobe-customeraccount
-  → adobeCustomerAccount function
-  → customeraccount topic (SystemOrigin=adobe)
-  → customeraccountsapSubscription
-  → customerAccountSap function
-  → SAP connector POST /SendIDoc/v2
-```
-
-The Adobe on-ramp accepts the Adobe contract, derives create/update from the original HTTP verb, maps it into an IDoc-shaped message, and publishes it with `SystemOrigin=adobe`. The SAP subscription excludes SAP-origin messages. The off-ramp serializes the message as `ZBUPA_CBO` XML and invokes SAP.
-
-The BIP path currently performs Adobe JSON → XML → rootless JSON → XML. This POC models Adobe JSON and SAP XML directly and keeps the business mapping in Taxi. One local runtime limitation affects only outbound serialization: Orbital 0.38 can read the SAP `@Xml` model, but its HTTP request factory cannot serialize that model. Taxi therefore sends an equivalent structured JSON envelope to the bridge, whose narrow serializer emits `ZBUPA_CBO` XML without changing business values.
-
-### SAP → Adobe
-
-```text
-SAP ZBUPA_CBO IDoc
-  → SAP gateway
-  → ZBUPA_CBO queue
-  → la-bip-sap-customeraccount
-  → customeraccount topic (SystemOrigin=sap)
-  → customeraccountadobeSubscription
-  → customerAccountAdobe function
-  → Adobe POST or PUT /rest/V1/customers
-```
-
-SAP XML is converted to an IDoc-shaped JSON message and published with `SystemOrigin=sap`. The Adobe subscription excludes Adobe-origin messages. Only `KTOKD=1` is sent to Adobe. `MSGFN=004` selects `PUT`; every other message function currently selects `POST`.
-
-### FWT off-ramp
-
-```text
-customeraccount topic
-  → customeraccountfwtSubscription
-  → customerAccountFwt function
-  → FWT POST /customer-accounts
-```
-
-The current subscription filter excludes `fwt` and `adobeprospect`, but accepts both `adobe` and `sap`. The POC implements those two evidenced origins. Hybris is accepted by the production negative filter but remains outside this Adobe/SAP POC.
-
-## POC transport substitution
-
-The production BIP flow above remains the behavioral reference. In the POC, RabbitMQ replaces both the real SAP endpoint and the Azure messaging plumbing around it:
-
-| Production boundary | POC replacement |
-|---|---|
-| Azure Service Bus `customeraccount` topic | RabbitMQ topic exchange `poc.customer-account.events` |
-| Service Bus topic subscription | A dedicated durable RabbitMQ queue plus binding |
-| SAP `/SendIDoc/v2` connector | Queue `poc.customer-account.adobe-to-sap` |
-| SAP gateway/on-ramp | Test publisher plus queue `poc.customer-account.sap-to-adobe` |
-| Logic App transport code | Thin `rabbit-bridge` sidecar |
-
-RabbitMQ publishers publish to exchanges and subscribers consume from queues. Each destination therefore gets its own queue; sharing one queue between Adobe and FWT would load-balance messages instead of providing each destination a copy.
-
-## POC architecture
+### End-to-end component view
 
 ```mermaid
 flowchart LR
-    AdobeIn[Adobe fixture<br/>JSON update] --> AdobeQuery[Saved query<br/>from-adobe]
-    AdobeQuery --> Semantic[Reusable Taxi<br/>semantic types]
-    Semantic --> SapModel[SAP-owned<br/>IDoc XML model]
-    SapModel --> PublishBridge[rabbit-bridge<br/>HTTP publish endpoint]
-    PublishBridge --> Exchange[(RabbitMQ topic exchange<br/>poc.customer-account.events)]
-    Exchange -->|customer-account.adobe.*| SapInbox[[SAP inbox queue<br/>adobe-to-sap]]
-    Exchange -->|customer-account.adobe.*| AdobeFwtQueue[[FWT subscription<br/>adobe-to-fwt]]
+    Adobe["Adobe or API caller"]
+    SapProducer["SAP test producer"]
 
-    SapPublisher[SAP XML fixture<br/>test publisher] --> Exchange
-    Exchange -->|customer-account.sap.*| AdobeQueue[[Subscription queue<br/>sap-to-adobe]]
-    AdobeQueue --> ConsumeBridge[rabbit-bridge<br/>AMQP consumer]
-    ConsumeBridge --> SapQuery[Saved query<br/>from-sap]
-    SapQuery --> Semantic
-    Semantic --> AdobeModel[Adobe-owned<br/>customer model]
-    AdobeModel --> AdobeStub[Adobe HTTP stub<br/>captures JSON]
+    subgraph OrbitalRuntime["Orbital runtime"]
+        FromAdobe["POST /api/q/customer-account/from-adobe"]
+        FromSap["POST /api/q/customer-account/from-sap"]
+        ToFwt["POST /api/q/customer-account/to-fwt"]
+        AdobeSapProjection["Taxi Adobe-to-SAP projection"]
+        SapAdobeProjection["Taxi SAP-to-Adobe projection"]
+        IdocFwtProjection["Taxi IDoc-to-FWT projection"]
+        Taxonomy["Reusable Taxi taxonomy<br/>and system-owned contracts"]
+    end
 
-    Exchange -->|customer-account.sap.*| SapFwtQueue[[FWT subscription<br/>sap-to-fwt]]
-    AdobeFwtQueue --> AdobeFwtWorker[rabbit-bridge<br/>Adobe FWT worker]
-    SapFwtQueue --> SapFwtWorker[rabbit-bridge<br/>SAP FWT worker]
-    AdobeFwtWorker --> FwtQuery[Saved query<br/>to-fwt]
-    SapFwtWorker --> FwtQuery
-    FwtQuery --> Semantic
-    Semantic --> FwtModel[FWT-owned<br/>customer model]
-    FwtModel --> FwtStub[FWT HTTP stub<br/>POST /customer-accounts]
+    subgraph BridgeProcesses["One Python codebase and Dockerfile, three configured services"]
+        Publisher["rabbit-bridge<br/>HTTP publisher and SAP-to-Adobe worker"]
+        AdobeFwtWorker["rabbit-bridge-adobe-to-fwt"]
+        SapFwtWorker["rabbit-bridge-sap-to-fwt"]
+    end
+
+    subgraph Rabbit["RabbitMQ vhost: poc"]
+        Events{{"poc.customer-account.events<br/>topic exchange"}}
+        AdobeSapQ["adobe-to-sap<br/>simulated SAP inbox"]
+        AdobeFwtQ["adobe-to-fwt"]
+        SapAdobeQ["sap-to-adobe"]
+        SapFwtQ["sap-to-fwt"]
+        DLX{{"poc.customer-account.dlx"}}
+        DLQs["Four route-specific DLQs"]
+    end
+
+    subgraph Nebula["Nebula service virtualization"]
+        AdobeStub["Adobe stub<br/>PUT /rest/V1/customers/{id}"]
+        FwtStub["FWT stub<br/>POST /customer-accounts"]
+    end
+
+    Adobe -->|"Adobe JSON and lineage headers"| FromAdobe
+    FromAdobe --> AdobeSapProjection
+    AdobeSapProjection -->|"Projected SAP IDoc JSON"| Publisher
+    Publisher -->|"Persistent SAP XML<br/>customer-account.adobe.updated"| Events
+
+    SapProducer -->|"Persistent SAP XML<br/>customer-account.sap.updated"| Events
+
+    Events -->|"customer-account.adobe.*"| AdobeSapQ
+    Events -->|"customer-account.adobe.*"| AdobeFwtQ
+    Events -->|"customer-account.sap.*"| SapAdobeQ
+    Events -->|"customer-account.sap.*"| SapFwtQ
+
+    AdobeSapQ -->|"No consumer: SAP boundary"| SimulatedSap["Simulated SAP target"]
+
+    SapAdobeQ --> Publisher
+    Publisher -->|"Raw SAP XML"| FromSap
+    FromSap --> SapAdobeProjection
+    SapAdobeProjection --> AdobeStub
+
+    AdobeFwtQ --> AdobeFwtWorker
+    SapFwtQ --> SapFwtWorker
+    AdobeFwtWorker -->|"Structural XML-to-JSON adaptation"| ToFwt
+    SapFwtWorker -->|"Structural XML-to-JSON adaptation"| ToFwt
+    ToFwt --> IdocFwtProjection
+    IdocFwtProjection --> FwtStub
+
+    Taxonomy -. "reused by" .-> AdobeSapProjection
+    Taxonomy -. "reused by" .-> SapAdobeProjection
+    Taxonomy -. "reused by" .-> IdocFwtProjection
+
+    AdobeSapQ -. "reserved DLX policy; no current rejector" .-> DLX
+    AdobeFwtQ -. "reject/no requeue" .-> DLX
+    SapAdobeQ -. "reject/no requeue" .-> DLX
+    SapFwtQ -. "reject/no requeue" .-> DLX
+    DLX --> DLQs
 ```
 
-The two directions remain separate. A message placed in the SAP inbox is not automatically echoed as a SAP-origin event. The round-trip test inspects the outbound XML, then publishes a paired SAP fixture with a new message ID and the same correlation ID. This makes routing observable and prevents an accidental infinite cycle.
+### Component responsibilities
 
-## Taxi modelling strategy
-
-Taxi types are the reusable vocabulary; models remain owned by the system whose wire contract they describe. Do not build one giant enterprise customer model and make all systems depend on its structure.
-
-### Core reusable types
-
-| Area | Taxi types | Notes |
+| Component | Owns | Does not own |
 |---|---|---|
-| Lineage | `CustomerAccountMessageId`, `CustomerAccountCorrelationId`, `CustomerAccountCausationId`, `CustomerAccountOrigin`, `CustomerAccountAction` | Required transport facts; they are not customer payload fields. |
-| Identity | `AdobeCustomerId`, `SapCustomerNumber` | Distinct concepts. Both inherit `String`; neither is an alias of the other. |
-| Person | `CustomerFirstName`, `CustomerLastName`, `CustomerTitle`, `CustomerDateOfBirth` | Title display text and SAP title code remain separate representations. |
-| Contact | `CustomerEmailAddress`, `TelephoneNumber`, `MobileNumber`, `FaxNumber` | Shared meanings across all three contracts. |
-| Address | `AddressLine`, `AddressLine1`, `AddressLine2`, `Town`, `Postcode`, `CountryCode`, `RegionCode`, `RegionName`, `CompanyName`, `DefaultShippingAddressFlag`, `DefaultBillingAddressFlag` | Positional address lines and independent shipping/billing facts remain distinguishable. Do not give Adobe numeric `region_id` the `RegionCode` type. |
-| Account | `CustomerAccountStatus`, `CustomerAccountType`, `CustomerAccountGroup`, `CustomerContactPreference`, `SalesDistrictCode` | Shared meanings map to Adobe, SAP, and FWT wire enums without making any system own the reusable definition. |
-| Money, later | `CustomerBalanceAmount`, `CreditLimitAmount`, `MonthlyPaymentAmount`, `CurrencyCode` | Add after the core round trip. |
-| Bank, later | `BankAccountNumber`, `AccountHolderName`, `Iban`, `Bic`, `BankCountryCode`, `BankValidFrom`, `BankValidTo` | Add as one parity slice, not field by field. |
+| Taxi source | Business meaning, system contracts, field extraction, enum/code equivalence, derived values, target request shapes, and orchestration calls. | AMQP connections, queue lifecycle, broker retries, or service virtualization. |
+| Orbital | Compiles Taxi, exposes saved queries as HTTP endpoints, resolves semantic facts, executes projections, and invokes described HTTP services. | RabbitMQ transport in this local stack. |
+| Python bridge | HTTP/AMQP adaptation, route metadata validation, XML/JSON structural conversion, confirms, consumer acknowledgement, reconnect state, and health reporting. | Customer status rules, names, address mapping, preference mapping, or target business models. |
+| RabbitMQ | Durable topic routing, independent subscription copies, persistence, consumer delivery, acknowledgements, and dead-letter routing. | Semantic transformation. |
+| Nebula | Disposable Adobe and FWT HTTP endpoints that capture the final request and return a deterministic response. | Messaging, assertions, persistence, or production behavior. |
+| Postgres | Orbital runtime persistence supplied by the generated Orbital stack. | POC message transport or customer system-of-record storage. |
 
-`SapCustomerNumber` must remain a string. The existing SAP → Adobe mapper parses it as an integer for Adobe's root `id`, which can remove leading zeroes. The semantic type must preserve the original value even if a particular target representation does not.
+## Why Taxi, the Python bridge, RabbitMQ, and Nebula exist
 
-### System-owned models
+### Why Taxi is the centre of the implementation
 
-Define independent models composed from the shared types:
+Adobe, SAP, and FWT use different names, structures, codes, and formats for the same business concepts. Taxi lets the contracts remain system-owned while declaring semantic equivalence through reusable types and enum synonyms.
 
-- `adobe.AdobeCustomerAccount`
-- `adobe.AdobeAddress`
-- `adobe.AdobeCustomAttribute`
-- `adobe.AdobeCustomerWriteRequest` for `{ "customer": ... }`
-- `sap.ZbupaCustomerAccountIdoc`
-- `sap.ZbupaCustomerCoreSegment`
-- `sap.ZbupaCustomerSecondarySegment`
-- `fwt.FwtCustomerAccount` and its nested FWT-owned request models
+For example:
 
-Adobe wire-only concepts use `AdobeAddressId`, `AdobeRegionId`, `AdobeCustomAttributeCode`, and `AdobeCustomAttributeValue`. `AdobeAddressId` and custom-attribute values inherit `String`, matching BIP's `AccountCreation.cs` contract. The Phase 1 custom-attribute carrier is deliberately not `Any`: the replicated BIP contract is string-valued, and keeping it typed avoids hiding legitimate primitive-field warnings project-wide.
+- Adobe exposes status through a custom-attribute array.
+- SAP carries status as `KATR5` codes such as `AC` and `BL`.
+- FWT expects status strings such as `ACTIVE` and `BLOCKED`.
+- All three values can be connected through the shared `CustomerAccountStatus` fact without a Python mapping table or one universal wire DTO.
 
-SAP wire/protocol concepts stay in the SAP namespace: IDoc segment/begin indicators, control-record table/client/release/type/sender fields, `SapIdocDirection`, `SapCustomerAccountGroup`, `SapCustomerAccountType`, and the opaque `SapCustomerGroupCode`. The account-group and account-type enum values come from BIP's `customerMaps.txt`; transport constants such as client `100` remain system-owned rather than reusable customer facts.
+The same approach keeps `AdobeCustomerId` and `SapCustomerNumber` deliberately distinct. They are both strings on the wire but are not interchangeable facts.
 
-Keep routing metadata as typed saved-query parameters, so each request body remains the real system wire format:
+### Why the Python bridge exists
 
-```text
-Adobe ingress
-  X-Message-Id        : CustomerAccountMessageId
-  X-Correlation-Id    : CustomerAccountCorrelationId
-  X-System-Origin     : CustomerAccountOrigin
-  X-Account-Action    : CustomerAccountAction
-  request body        : adobe.AdobeCustomerAccount JSON
+The deployed Orbital workspace has HTTP service connectivity but no configured supported RabbitMQ/AMQP Taxi connector. The bridge supplies that missing transport boundary.
 
-SAP ingress, called by rabbit-bridge
-  X-Message-Id        : CustomerAccountMessageId
-  X-Correlation-Id    : CustomerAccountCorrelationId
-  X-Causation-Id      : CustomerAccountCausationId?
-  X-System-Origin     : CustomerAccountOrigin
-  X-Adobe-Customer-Id : AdobeCustomerId
-  request body        : sap.ZbupaCustomerAccountIdoc XML
+It has two roles.
 
-FWT ingress, called by either FWT worker
-  X-Message-Id        : CustomerAccountMessageId
-  X-Correlation-Id    : CustomerAccountCorrelationId
-  X-Causation-Id      : CustomerAccountCausationId?
-  X-System-Origin     : CustomerAccountOrigin
-  X-Account-Action    : CustomerAccountAction
-  request body        : sap.ZbupaCustomerAccountPublishRequest JSON
+#### HTTP to AMQP publisher
+
+The Adobe saved query projects Adobe JSON into `ZbupaCustomerAccountPublishRequest` and calls `POST /publish` on the bridge. The bridge:
+
+1. validates UUID lineage, origin, action, schema, and event metadata;
+2. accepts the projected IDoc as JSON or an already serialized XML document;
+3. structurally serializes the JSON envelope to canonical `ZBUPA_CBO` XML when necessary;
+4. publishes with `delivery_mode=2`, `mandatory=true`, and publisher confirms;
+5. returns HTTP `202` only when RabbitMQ confirms a routable publish.
+
+The JSON-to-XML step is required by an observed Orbital 0.38 runtime limitation: Orbital can deserialize an `@Xml` model, but its HTTP request factory cannot serialize that model through the raw-object overload used by the write operation. Taxi still creates every business value; Python only emits XML elements and known attributes.
+
+#### AMQP to HTTP consumers
+
+One bridge process consumes one configured queue. It:
+
+1. passively checks that the queue already exists in RabbitMQ;
+2. uses `prefetch=1` and manual acknowledgement;
+3. validates the routing key and required AMQP properties/headers;
+4. forwards the payload and lineage metadata to a configured Orbital saved query;
+5. acknowledges only after Orbital returns a 2xx response;
+6. rejects with `requeue=false` on validation, conversion, HTTP, or downstream failures, allowing RabbitMQ to dead-letter the message.
+
+The SAP-to-Adobe worker forwards raw XML. The FWT workers convert the XML to the structurally equivalent `{ "IDOC": ... }` JSON envelope before calling Orbital. This avoids an observed concurrent XML-parser defect when the same SAP event is parsed by two saved queries at once. The adapter preserves element values as strings, XML attributes, whitespace inside values, and repeated children; it does not derive or rename customer facts.
+
+The bridge is intentionally small and replaceable. If the deployed Orbital edition gains a supported RabbitMQ connector with the required acknowledgement and metadata behavior, the Python transport can be removed without redesigning the Taxi contracts.
+
+### Why RabbitMQ exists
+
+RabbitMQ replaces the production asynchronous broker and the SAP subscription boundary. A durable topic exchange provides source-based fan-out:
+
+- one Adobe event creates an independent SAP-inbox copy and FWT copy;
+- one SAP event creates an independent Adobe copy and FWT copy;
+- a failure in one target route does not roll back or block the other route;
+- positive bindings make the permitted routes explicit and prevent source-system echo routing.
+
+RabbitMQ also makes acknowledgement timing, persistence, unroutable publishes, and route-specific dead-lettering visible in a local POC.
+
+### Why Nebula exists
+
+Nebula is a development-only target simulator. It proves that Orbital completed the target projection and HTTP call without requiring Adobe/FWT credentials or causing external side effects.
+
+The script provides:
+
+- `PUT /rest/V1/customers/{adobeCustomerId}`, which logs `ADOBE_STUB_CAPTURE id=... body=...` and returns the ID;
+- `POST /customer-accounts`, which logs `FWT_STUB_CAPTURE body=...` and returns `{ "status": "accepted" }`.
+
+Nebula does not emulate RabbitMQ, store customer data, or assert payload correctness. The deterministic files in `test-data/` are the expected results; Nebula only makes the actual request observable in logs.
+
+`orbital/config/services.conf` maps stable Taxi service names to Docker-network URLs, so the Taxi contracts do not contain environment-specific host ports. Nebula must not be used as a production target.
+
+## Taxi semantic modelling
+
+### Model layers and responsibility boundary
+
+```mermaid
+flowchart LR
+    AdobeJson["Adobe JSON"]
+    AdobeContract["AdobeCustomerAccount<br/>Adobe-owned wire model"]
+    Facts["Reusable Taxi facts<br/>identity, person, address,<br/>status, type, preference"]
+
+    SapPublish["ZbupaCustomerAccountPublishRequest<br/>plain parameter model"]
+    JsonXml["Python structural serializer<br/>IDoc JSON to SAP XML"]
+    SapXml["ZBUPA_CBO SAP IDoc XML<br/>RabbitMQ wire body"]
+
+    SapRead["ZbupaCustomerAccountIdoc<br/>Taxi @Xml input model"]
+    XmlJson["Python structural adapter<br/>SAP XML to equivalent JSON"]
+    SapJsonRead["ZbupaCustomerAccountPublishRequest<br/>FWT query input"]
+
+    AdobeWrite["AdobeCustomerWriteRequest"]
+    FwtWrite["FwtCustomerAccount"]
+    AdobeCrossRef["X-Adobe-Customer-Id<br/>explicit POC cross-reference"]
+
+    AdobeJson --> AdobeContract
+    AdobeContract -->|"jsonPath extraction and enum synonyms"| Facts
+    Facts --> SapPublish
+    SapPublish --> JsonXml
+    JsonXml --> SapXml
+
+    SapXml --> SapRead
+    SapRead --> Facts
+    Facts --> AdobeWrite
+    AdobeCrossRef --> AdobeWrite
+
+    SapXml --> XmlJson
+    XmlJson --> SapJsonRead
+    SapJsonRead --> Facts
+    Facts -->|"derived display name, date, and booleans"| FwtWrite
 ```
 
-RabbitMQ still carries the native SAP XML body. The FWT workers perform only a structural XML-to-IDoc-JSON format adaptation before invoking Orbital. This avoids an Orbital 0.38 concurrent XML-parser failure when the two SAP-origin subscriptions are processed at the same time; all semantic projection remains in Taxi.
+### Reusable semantic facts
 
-`X-Adobe-Customer-Id` is an explicit Phase 1 substitute for the unresolved production identity cross-reference. It prevents the taxonomy from pretending that `KUNNR` and Adobe's root `id` are the same concept. The paired synthetic fixture may give them the same text while retaining their distinct Taxi types. SAP action is derived from `MSGFN`; the Adobe ingress receives it explicitly because BIP derives it from the original HTTP verb.
+`src/taxonomy/customer-account-types.taxi` defines narrow scalar facts instead of typing every field as `String` or `Boolean`. This prevents Taxi from satisfying a target field with a merely type-compatible but semantically wrong value.
 
-### Semantic enums and lookups
+Important examples are:
 
-Represent business meanings independently from source codes:
+- `AdobeCustomerId` versus `SapCustomerNumber`;
+- `CustomerFirstName` versus `CustomerLastName`;
+- `AddressLine1` versus `AddressLine2`;
+- `TelephoneNumber` versus `MobileNumber`;
+- `DefaultShippingAddressFlag` versus `DefaultBillingAddressFlag`;
+- message, correlation, and causation IDs as separate lineage facts.
 
-| Meaning | Adobe representation | SAP representation |
-|---|---|---|
-| Update | ingress action `UPDATE` | `MSGFN=004` |
-| Create, later | ingress action `CREATE` | `MSGFN=009` in the current mapper |
-| Active | `ACTIVE` | `AC` |
-| Blocked | `BLOCKED` | `BL` |
-| Deactivated | `DEACTIVE` | `DC` |
-| Declined | `DECLINED` | `DE` |
-| In process | `INPROCESS` | `IN` |
-| On hold | `ONHOLD` | `OH` |
-| Email only | email=true, post=false | `EML` |
-| Post only | email=false, post=true | `PST` |
-| Email and post | email=true, post=true | `PEM` |
-| Neither | email=false, post=false | `NON` |
-| IDoc direction | not applicable | inbound `DIRECT=2` |
-| Individual account group | implicit in this Adobe slice | `KTOKD=1` |
-| Retail account type | not exposed by this Adobe slice | `KATR1=01` |
+`src/taxonomy/customer-account-enums.taxi` defines system-neutral meanings. System contracts declare their wire enum members as synonyms of those shared meanings.
 
-Use Taxi enum synonyms where the mapping is closed and genuinely bidirectional. Use an explicit lookup source for reference data such as title and sales district, where BIP currently reads Azure Table `refData`. The first slice can use a small deterministic local lookup fixture.
+### System-owned contracts
 
-Email and post communication use separate Adobe enums even though their wire values are both `1`/`0` or `true`/`false`: they are independent facts. Both synonym-map to the shared consent meaning. SAP `DIRECT`, `KTOKD`, and `KATR1` use enums so their defaults are named and still serialize as the required wire codes.
+The POC does not create one canonical physical customer object that every system must use.
 
-Do not reproduce these BIP asymmetries silently:
+- Adobe retains nested JSON addresses and custom-attribute arrays.
+- SAP retains its `ZBUPA_CBO` control, core, and secondary IDoc segments and XML attributes.
+- FWT retains its nested customer, recipient, address, and preference structure.
 
-- SAP → Adobe emits contact flags as the strings `"true"`/`"false"`, while Adobe → SAP currently checks `"1"`/`"0"`. Model email and post as separate semantic enums and translate each wire form.
-- SAP → Adobe exposes raw `ANRED` in one Adobe custom attribute, while Adobe → SAP expects a display title for its lookup. Keep `SapTitleCode` and `CustomerTitle` separate.
-- SAP `REGIO` is a region code; Adobe's `region_id` is numeric. They are not the same type.
-- Adobe root `id` and custom attribute `sap_unique_id` are not interchangeable identities.
+The source contracts expose hidden facts and the target `parameter closed model` declarations tell Taxi exactly what must be constructed. `closed` keeps the wire shape deliberate; `parameter` models allow Taxi to populate fields from available semantic facts and expressions.
 
-## Phase 1 field contract
+### Important transformations
 
-| Semantic fact | Adobe source/target | SAP source/target | First-slice rule |
-|---|---|---|---|
-| Adobe identity | root `id` | none | Keep as `AdobeCustomerId`; required for Adobe update target. |
-| SAP identity | custom `sap_unique_id` | `KUNNR` | Keep as `SapCustomerNumber`; required for SAP update. |
-| Action | ingress `UPDATE` | `MSGFN=004` | Update only. Reject other actions in Phase 1. |
-| Customer type | Adobe customer | `KTOKD` | Write and accept only `1` (individual). |
-| First name | `firstname` | `NAME1` | Direct semantic mapping. |
-| Last name | `lastname` | `NAME2` | Direct semantic mapping. |
-| Email | `email` | `KNURL` | Direct semantic mapping. |
-| Date of birth | `dob` | `RGDATE` | Define and test one normalized date representation. |
-| Street line 1 | default billing `street[0]` | `STRAS` | Require a default billing address in the fixture. |
-| Street line 2 | default billing `street[1]` | `PSOO4` | Optional. |
-| Town | address `city` | `ORT01` | Direct semantic mapping. |
-| Postcode | address `postcode` | `PSTLZ` | Direct semantic mapping. |
-| Country | address `country_id` | `LAND1` | Country code, not a country description. |
-| Region | address `region.region_code` | `REGIO` | Region code only; do not use `region_id`. |
-| Telephone | address `telephone` | `TELF1` | Direct semantic mapping. |
-| Mobile | address alternate telephone | `MOB_NUMBER` | Confirm the chosen Adobe field in the fixture. |
-| Status | custom `cellar_plan_status` | `KATR5` | Use the explicit status enum mapping. |
-| Contact preference | two Adobe booleans | `KATR10` | Normalize to one semantic preference enum. |
+| Business fact | Adobe representation | SAP representation | FWT representation | Rule |
+|---|---|---|---|---|
+| SAP customer number | `custom_attributes[sap_unique_id].value` | `ZBP_CBO/KUNNR` | `id`, `addressDetails.id` | Preserve as a string, including leading zeroes. |
+| Adobe identity | top-level `id` | Not inserted into the IDoc | Not required | Reverse Adobe writes use explicit `X-Adobe-Customer-Id`; never infer it from `KUNNR`. |
+| First/last name | `firstname`, `lastname` | `NAME1`, `NAME2` | nested names plus `name` | FWT display name is deterministic `first + " " + last`. |
+| Date of birth | `dob` as `yyyyMMdd` | `RGDATE` as `yyyyMMdd` | `birthDate` as `yyyy-MM-dd` | FWT uses explicit string slicing; there is no current-time fallback. |
+| Address lines | default billing `street[0..1]` | `STRAS`, `PSOO4` | `street`, `buildingName` | Adobe ingress selects the default billing address. |
+| Town/postcode/country/region | nested address fields | `ORT01`, `PSTLZ`, `LAND1`, `REGIO` | nested address fields | Direct semantic mapping; optional region remains optional. |
+| Telephone/mobile | `telephone`, `alt_telephone` | `TELF1`, `MOB_NUMBER` | `phoneNumber`, `cellphone` | Distinct reusable facts prevent substitution. |
+| Status | custom strings such as `ACTIVE` | `KATR5`: `AC`, `BL`, `DC`, `DE`, `IN`, `OH` | FWT status strings | Taxi enum synonyms declare the code equivalence. |
+| Contact preference | separate email/post flags (`1/0` ingress and `true/false` reverse write) | `KATR10`: `EML`, `PST`, `PEM`, `NON` | separate post/email booleans | Adobe flags combine into one shared preference and are expanded again per target. |
+| Account group | no first-slice field | `KTOKD`: `1` or `2` | `INDIVIDUAL` or `ORGANISATION` | The enabled forward slice defaults to individual. |
+| Account type | no first-slice field | `KATR1`: `01`, `02`, `03` | `RETAIL`, `WHOLESALE`, `WINECLUB` | The enabled forward slice defaults to retail. |
+| Action | HTTP header `UPDATE` | `MSGFN=004` | `actionCode=UPDATE` | Update is the only enabled action. |
 
-The first fixture may deliberately use equal textual Adobe and SAP IDs to exercise the current BIP update path, but the Taxi types must remain distinct. Before using non-synthetic data, select an authoritative identity cross-reference. Do not solve this by aliasing the two ID types.
+### SAP input and output models
 
-## FWT first-slice contract
+`sap-customer-account.taxi` contains two structurally identical top-level models for a runtime-specific reason:
 
-Both FWT queues carry the same SAP IDoc-shaped event body, so one Taxi query projects either origin into the same FWT-owned model:
+- `ZbupaCustomerAccountIdoc` is annotated `@Xml` and is used to deserialize raw SAP XML on the SAP-to-Adobe path.
+- `ZbupaCustomerAccountPublishRequest` is a plain parameter model and is used for outbound HTTP projection and the FWT JSON ingress workaround.
 
-| FWT field | Reusable/SAP fact | Implemented rule |
-|---|---|---|
-| `id` | `SapCustomerNumber` / `KUNNR` | Preserve the string, including leading zeroes. |
-| `name` | `CustomerFirstName`, `CustomerLastName` | `concat(firstName, " ", lastName)`. |
-| `type` | shared `CustomerAccountType` via `KATR1` | `01/02/03` → `RETAIL/WHOLESALE/WINECLUB`. |
-| `email` | `CustomerEmailAddress` / `KNURL` | Direct semantic reuse. |
-| `status` | shared `CustomerAccountStatus` via `KATR5` | FWT wire values include `DEACTIVE`, `INPROCESS`, and `ONHOLD`. |
-| `actionCode` | shared `CustomerAccountAction` via `MSGFN` | The update slice maps `004` → `UPDATE`; the FWT HTTP method remains `POST`. |
-| `customerGroup` | shared `CustomerAccountGroup` via `KTOKD` | `1/2` → `INDIVIDUAL/ORGANISATION`. |
-| `addressDetails` | shared address, identity, name, email, phone, and mobile facts | Nested FWT JSON with `country.isocode` and `recipient`. |
-| `customerDetails.birthDate` | `CustomerDateOfBirth` / `RGDATE` | Explicit `yyyyMMdd` → `yyyy-MM-dd` string slicing; no current-time fallback. |
-| `accountAttributes.contactPreferences` | shared `CustomerContactPreference` via `KATR10` | `PST`, `EML`, `PEM`, or neither → separate FWT post/email booleans. |
-
-This is not full `CustomerAccountCanonical` parity. It intentionally omits generated timestamps, last activity, money/currency, bank accounts, account manager/partner data, reference-data descriptions such as country name, most flags, standing instructions, and additional-properties bags. Those are continuation slices, not silently defaulted values.
+Both describe the same `IDOC` content. The bridge conversion is therefore a format change, not a second business model.
 
 ## RabbitMQ topology
 
-RabbitMQ uses an exchange plus bound queues rather than Azure-style topic/subscription objects. Use one durable topic exchange and one durable queue per directional integration route:
+### Exchanges, queues, and dead-letter routes
 
-| Object | Binding or route | Phase | Purpose |
-|---|---|---|---|
-| Exchange `poc.customer-account.events` | Type `topic` | 1 | The customer-account event bus. |
-| Queue `poc.customer-account.adobe-to-sap` | `customer-account.adobe.*` | 1 | Fake SAP inbox; contains mapped `ZBUPA_CBO` XML. |
-| Queue `poc.customer-account.sap-to-adobe` | `customer-account.sap.*` | 1 | Subscription consumed by `rabbit-bridge` and forwarded to the SAP → Adobe query. |
-| Queue `poc.customer-account.adobe-to-fwt` | `customer-account.adobe.*` | 2 | Independent Adobe-origin FWT subscription consumed by its worker. |
-| Queue `poc.customer-account.sap-to-fwt` | `customer-account.sap.*` | 2 | Independent SAP-origin FWT subscription consumed by its worker. |
-| Exchange `poc.customer-account.dlx` | Type `topic` | 1 | Dead-letter exchange for failed route deliveries. |
-| One `.dlq` per main queue | Explicit dead-letter routing key | 1/2 | Failure inspection and manual replay. |
+```mermaid
+flowchart TB
+    Events{{"poc.customer-account.events<br/>durable topic exchange"}}
 
-Use routing keys that state the source and action:
+    A2S["poc.customer-account.adobe-to-sap"]
+    A2F["poc.customer-account.adobe-to-fwt"]
+    S2A["poc.customer-account.sap-to-adobe"]
+    S2F["poc.customer-account.sap-to-fwt"]
 
-```text
-customer-account.adobe.updated
-customer-account.adobe.created      # later
-customer-account.sap.updated
-customer-account.sap.created        # later
+    Events -->|"customer-account.adobe.*"| A2S
+    Events -->|"customer-account.adobe.*"| A2F
+    Events -->|"customer-account.sap.*"| S2A
+    Events -->|"customer-account.sap.*"| S2F
+
+    A2S -->|"No consumer"| SapBoundary["Simulated SAP subscription"]
+    A2F -->|"manual-ack consumer"| AFW["Adobe-to-FWT worker"]
+    S2A -->|"manual-ack consumer"| SAW["SAP-to-Adobe worker"]
+    S2F -->|"manual-ack consumer"| SFW["SAP-to-FWT worker"]
+
+    DLX{{"poc.customer-account.dlx<br/>durable topic exchange"}}
+
+    A2S -. "reserved: no current consumer can reject" .-> DLX
+    A2F -. "dead.customer-account.adobe-to-fwt" .-> DLX
+    S2A -. "dead.customer-account.sap-to-adobe" .-> DLX
+    S2F -. "dead.customer-account.sap-to-fwt" .-> DLX
+
+    A2SDLQ["poc.customer-account.adobe-to-sap.dlq"]
+    A2FDLQ["poc.customer-account.adobe-to-fwt.dlq"]
+    S2ADLQ["poc.customer-account.sap-to-adobe.dlq"]
+    S2FDLQ["poc.customer-account.sap-to-fwt.dlq"]
+
+    DLX -->|"dead.customer-account.adobe-to-sap"| A2SDLQ
+    DLX -->|"dead.customer-account.adobe-to-fwt"| A2FDLQ
+    DLX -->|"dead.customer-account.sap-to-adobe"| S2ADLQ
+    DLX -->|"dead.customer-account.sap-to-fwt"| S2FDLQ
 ```
 
-Do not bind a consumer queue to `customer-account.#`. Explicit positive bindings are the first loop-prevention control and make the allowed directions reviewable.
+There are four business/main queues and four supporting DLQs. The two FWT business queues are:
 
-### Rabbit message contract
+- `poc.customer-account.adobe-to-fwt`;
+- `poc.customer-account.sap-to-fwt`.
 
-The Rabbit body is the native SAP `ZBUPA_CBO` XML contract with `content_type=application/xml`. Transport facts are AMQP properties or headers, not XML elements:
+Each FWT route has a separate queue because each source event must have an independent delivery state, acknowledgement, and failure record.
 
-| AMQP property/header | Meaning |
+### Topology table
+
+| Object | Type/binding | Consumer | Purpose |
+|---|---|---|---|
+| `poc.customer-account.events` | durable topic exchange | n/a | Receives customer-account events and creates one copy per matching target subscription. |
+| `poc.customer-account.adobe-to-sap` | `customer-account.adobe.*` | none | Durable simulated SAP inbox. A successful Adobe smoke-test message remains here until inspected or removed. |
+| `poc.customer-account.adobe-to-fwt` | `customer-account.adobe.*` | `rabbit-bridge-adobe-to-fwt` | Independent Adobe-origin FWT delivery. |
+| `poc.customer-account.sap-to-adobe` | `customer-account.sap.*` | `rabbit-bridge` | Independent SAP-origin Adobe delivery. |
+| `poc.customer-account.sap-to-fwt` | `customer-account.sap.*` | `rabbit-bridge-sap-to-fwt` | Independent SAP-origin FWT delivery. |
+| `poc.customer-account.dlx` | durable topic exchange | n/a | Routes terminally rejected messages by route-specific dead-letter key. |
+| `*.dlq` | one durable queue per main queue | none | Retains failed messages for manual diagnosis or later replay tooling. |
+
+`customer-account.fwt.*` has no binding. No queue is bound to `customer-account.#` because that would make loop prevention and allowed source-to-target routes ambiguous.
+
+The `adobe-to-sap.dlq` and its DLX binding are provisioned for symmetry and a future SAP consumer. They are inactive today: `adobe-to-sap` has no consumer, TTL, or max-length policy, so no current component rejects or expires its messages.
+
+## End-to-end flow diagrams
+
+### Adobe-origin flow
+
+```mermaid
+flowchart LR
+    Input["Adobe update JSON"]
+    FromAdobe["Orbital from-adobe query"]
+    SapProjection["Taxi Adobe facts to SAP IDoc"]
+    Publish["Bridge /publish<br/>JSON to XML"]
+    Exchange{{"Rabbit topic exchange"}}
+    SapQueue["adobe-to-sap<br/>persistent simulated inbox"]
+    FwtQueue["adobe-to-fwt"]
+    FwtWorker["Adobe-to-FWT worker<br/>validate and XML to JSON"]
+    ToFwt["Orbital to-fwt query"]
+    FwtProjection["Taxi SAP facts to FWT"]
+    FwtStub["Nebula FWT POST capture"]
+
+    Input --> FromAdobe --> SapProjection --> Publish --> Exchange
+    Exchange -->|"customer-account.adobe.*"| SapQueue
+    Exchange -->|"customer-account.adobe.*"| FwtQueue
+    FwtQueue --> FwtWorker --> ToFwt --> FwtProjection --> FwtStub
+```
+
+The FWT copy contains the same SAP XML body as the simulated SAP-inbox copy. RabbitMQ does not contain an FWT-shaped message. Taxi produces the FWT request only when the FWT worker calls the saved query.
+
+### SAP-origin flow
+
+```mermaid
+flowchart LR
+    SapInput["SAP ZBUPA_CBO XML<br/>plus AMQP metadata"]
+    Exchange{{"Rabbit topic exchange"}}
+
+    AdobeQueue["sap-to-adobe"]
+    AdobeWorker["SAP-to-Adobe worker<br/>validate; preserve XML"]
+    FromSap["Orbital from-sap query"]
+    AdobeProjection["Taxi SAP facts to Adobe"]
+    AdobeStub["Nebula Adobe PUT capture"]
+
+    FwtQueue["sap-to-fwt"]
+    FwtWorker["SAP-to-FWT worker<br/>validate; XML to JSON"]
+    ToFwt["Orbital to-fwt query"]
+    FwtProjection["Taxi SAP facts to FWT"]
+    FwtStub["Nebula FWT POST capture"]
+
+    SapInput --> Exchange
+    Exchange -->|"customer-account.sap.*"| AdobeQueue --> AdobeWorker --> FromSap --> AdobeProjection --> AdobeStub
+    Exchange -->|"customer-account.sap.*"| FwtQueue --> FwtWorker --> ToFwt --> FwtProjection --> FwtStub
+```
+
+The two branches are independent. For example, a missing Adobe cross-reference can dead-letter the Adobe copy while the FWT copy still succeeds.
+
+## Detailed sequence diagrams
+
+### Adobe update to SAP and FWT
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller as Adobe / API caller
+    participant Orbital
+    participant Bridge as rabbit-bridge /publish
+    participant Rabbit as RabbitMQ exchange
+    participant A2S as adobe-to-sap queue
+    participant A2F as adobe-to-fwt queue
+    participant FwtWorker as Adobe-to-FWT worker
+    participant FwtStub as Nebula FWT stub
+    participant DLX as Dead-letter exchange
+    participant FwtDLQ as adobe-to-fwt.dlq
+
+    Caller->>Orbital: POST /from-adobe<br/>Adobe JSON and lineage headers
+    Orbital->>Orbital: Parse Adobe contract and expose semantic facts
+    Orbital->>Orbital: Project SAP IDoc parameter model
+    Orbital->>Bridge: POST /publish<br/>SAP IDoc JSON, lineage, and derived X-Adobe-Customer-Id
+    Bridge->>Bridge: Validate route metadata
+    Bridge->>Bridge: Structurally serialize IDoc JSON to XML
+    Bridge->>Rabbit: basic.publish mandatory=true<br/>delivery_mode=2<br/>customer-account.adobe.updated
+
+    alt Publish was confirmed and routed
+        par SAP subscription copy
+            Rabbit->>A2S: Persist SAP IDoc XML
+        and FWT subscription copy
+            Rabbit->>A2F: Persist independent SAP IDoc XML copy
+        end
+        Rabbit-->>Bridge: Positive publisher confirm
+        Bridge-->>Orbital: HTTP 202 publish receipt
+        Orbital-->>Caller: Successful query response
+        Note over Caller,FwtWorker: Caller success confirms broker publication,<br/>not completion of the asynchronous FWT branch.
+        Note over A2S: The SAP copy remains ready because<br/>this queue intentionally has no consumer.
+
+        A2F->>FwtWorker: basic.deliver, auto_ack=false
+        FwtWorker->>FwtWorker: Validate properties, UUIDs, origin,<br/>action, schema, and event type<br/>then attempt structural XML-to-JSON adaptation
+
+        alt Validation or structural conversion fails
+            FwtWorker->>A2F: basic.reject(requeue=false)
+            A2F->>DLX: dead.customer-account.adobe-to-fwt
+            DLX->>FwtDLQ: Retain body/properties plus dead-letter metadata
+        else Pre-forward checks succeed
+            FwtWorker->>Orbital: POST /to-fwt<br/>X-System-Origin: adobe
+            Orbital->>Orbital: Attempt to project SAP facts into FWT contract
+            Orbital->>FwtStub: If projection succeeds, POST /customer-accounts<br/>X-Integration-Write: true
+
+            alt Projection and FWT write return 2xx
+                FwtStub-->>Orbital: 200 accepted
+                Orbital-->>FwtWorker: 2xx
+                FwtWorker->>A2F: basic.ack
+            else Orbital projection, HTTP, or target write fails
+                FwtStub-->>Orbital: Error/non-2xx if target was called
+                Orbital-->>FwtWorker: Error or non-2xx
+                FwtWorker->>A2F: basic.reject(requeue=false)
+                A2F->>DLX: dead.customer-account.adobe-to-fwt
+                DLX->>FwtDLQ: Retain body/properties plus dead-letter metadata
+            end
+        end
+    else Unroutable publish or explicit NACK
+        Rabbit-->>Bridge: Return or NACK
+        Bridge-->>Orbital: HTTP 503
+        Orbital-->>Caller: Query failure<br/>No queue copy was accepted
+    else AMQP connection or confirm is lost
+        Rabbit-->>Bridge: Connection/confirm error
+        Bridge-->>Orbital: HTTP 503
+        Orbital-->>Caller: Publication outcome may be unknown<br/>Inspect RabbitMQ before retrying
+    end
+```
+
+### SAP update to Adobe and FWT
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor SAP as SAP test producer
+    participant Rabbit as RabbitMQ exchange
+    participant S2A as sap-to-adobe queue
+    participant AdobeWorker as SAP-to-Adobe bridge
+    participant S2F as sap-to-fwt queue
+    participant FwtWorker as SAP-to-FWT bridge
+    participant Orbital
+    participant AdobeStub as Nebula Adobe stub
+    participant FwtStub as Nebula FWT stub
+    participant DLX as Dead-letter exchange
+    participant AdobeDLQ as sap-to-adobe.dlq
+    participant FwtDLQ as sap-to-fwt.dlq
+
+    SAP->>Rabbit: Publish persistent SAP IDoc XML<br/>customer-account.sap.updated<br/>AMQP properties and headers
+
+    par Adobe branch
+        Rabbit->>S2A: Persist independent copy
+        S2A->>AdobeWorker: basic.deliver, auto_ack=false
+        AdobeWorker->>AdobeWorker: Validate route, UUIDs, schema,<br/>event type, origin, action, and Adobe ID
+
+        alt Metadata is invalid
+            AdobeWorker->>S2A: basic.reject(requeue=false)
+            S2A->>DLX: dead.customer-account.sap-to-adobe
+            DLX->>AdobeDLQ: Retain body/properties plus dead-letter metadata
+        else Metadata is valid
+            AdobeWorker->>Orbital: POST /from-sap<br/>raw SAP XML and propagated headers
+            Orbital->>Orbital: Attempt @Xml parse and Adobe projection
+            Orbital->>AdobeStub: If projection succeeds, PUT customer<br/>X-Integration-Write: true
+
+            alt Projection and Adobe write return 2xx
+                AdobeStub-->>Orbital: 200 JSON response
+                Orbital-->>AdobeWorker: 2xx
+                AdobeWorker->>S2A: basic.ack
+            else Orbital projection, HTTP, or target write fails
+                AdobeStub-->>Orbital: Error/non-2xx if target was called
+                Orbital-->>AdobeWorker: Error or non-2xx
+                AdobeWorker->>S2A: basic.reject(requeue=false)
+                S2A->>DLX: dead.customer-account.sap-to-adobe
+                DLX->>AdobeDLQ: Retain body/properties plus dead-letter metadata
+            end
+        end
+    and FWT branch
+        Rabbit->>S2F: Persist independent copy
+        S2F->>FwtWorker: basic.deliver, auto_ack=false
+        FwtWorker->>FwtWorker: Validate route, UUIDs, schema,<br/>event type, origin, and action<br/>then attempt structural XML-to-JSON adaptation
+
+        alt Validation or structural conversion fails
+            FwtWorker->>S2F: basic.reject(requeue=false)
+            S2F->>DLX: dead.customer-account.sap-to-fwt
+            DLX->>FwtDLQ: Retain body/properties plus dead-letter metadata
+        else Pre-forward checks succeed
+            FwtWorker->>Orbital: POST /to-fwt<br/>equivalent IDoc JSON and headers
+            Orbital->>Orbital: Attempt FWT projection
+            Orbital->>FwtStub: If projection succeeds, POST customer account<br/>X-Integration-Write: true
+
+            alt Projection and FWT write return 2xx
+                FwtStub-->>Orbital: 200 accepted
+                Orbital-->>FwtWorker: 2xx
+                FwtWorker->>S2F: basic.ack
+            else Orbital projection, HTTP, or target write fails
+                FwtStub-->>Orbital: Error/non-2xx if target was called
+                Orbital-->>FwtWorker: Error or non-2xx
+                FwtWorker->>S2F: basic.reject(requeue=false)
+                S2F->>DLX: dead.customer-account.sap-to-fwt
+                DLX->>FwtDLQ: Retain body/properties plus dead-letter metadata
+            end
+        end
+    end
+```
+
+### Generic consumer acknowledgement and dead-letter sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Queue as Main route queue
+    participant Worker as Configured bridge worker
+    participant Orbital
+    participant Target as Adobe or FWT target
+    participant DLX as poc.customer-account.dlx
+    participant DLQ as Route-specific DLQ
+
+    Queue->>Worker: basic.deliver, auto_ack=false
+    Worker->>Worker: Validate content type, persistence,<br/>UUIDs, route, origin, action,<br/>schema, event type, and conditional Adobe ID<br/>then adapt XML if this is a JSON-mode worker
+
+    alt Metadata or structural conversion is invalid
+        Worker-->>Queue: basic.reject(requeue=false)
+        Queue->>DLX: Queue-specific dead-letter routing key
+        DLX->>DLQ: Retain original body/properties<br/>plus Rabbit dead-letter metadata
+    else Pre-forward checks succeed
+        Worker->>Orbital: POST configured saved query
+        Orbital->>Orbital: Attempt Taxi projection
+        Orbital->>Target: If projection succeeds, execute target write
+
+        alt Projection and target write return 2xx
+            Target-->>Orbital: 2xx
+            Orbital-->>Worker: 2xx
+            Worker-->>Queue: basic.ack
+        else Projection, HTTP, or target write fails
+            Target-->>Orbital: Error/non-2xx if target was called
+            Orbital-->>Worker: Error or non-2xx
+            Worker-->>Queue: basic.reject(requeue=false)
+            Queue->>DLX: Queue-specific dead-letter routing key
+            DLX->>DLQ: Retain original body/properties<br/>plus Rabbit dead-letter metadata
+        end
+    end
+```
+
+### Consumer state lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Connecting
+    Connecting --> Consuming: Rabbit connection and passive queue check succeed
+    Connecting --> WaitingToReconnect: Connection or queue check fails
+    WaitingToReconnect --> Connecting: Reconnect delay expires
+    Consuming --> Unacked: Message delivered
+    Unacked --> Acknowledged: Orbital returns 2xx
+    Unacked --> Rejected: Validation, conversion, HTTP, or non-2xx failure
+    Rejected --> DeadLettered: basic.reject(requeue=false)
+    Acknowledged --> Consuming
+    DeadLettered --> Consuming
+    Consuming --> WaitingToReconnect: AMQP connection is lost
+    Consuming --> [*]: Graceful shutdown
+```
+
+## HTTP and message contracts
+
+### Orbital saved-query endpoints
+
+| Endpoint | Input | Called by | Side effect |
+|---|---|---|---|
+| `POST /api/q/customer-account/from-adobe` | Adobe JSON plus typed lineage/origin/action headers | Smoke-test client or future Adobe on-ramp | Taxi projects SAP IDoc data and calls the bridge publisher. |
+| `POST /api/q/customer-account/from-sap` | Raw `ZBUPA_CBO` XML plus lineage and explicit Adobe ID | `rabbit-bridge` SAP-to-Adobe consumer | Taxi projects the Adobe write body and calls the Adobe service. |
+| `POST /api/q/customer-account/to-fwt` | Structurally equivalent IDoc JSON plus lineage/origin/action headers | Either FWT worker | Taxi projects the FWT write body and calls the FWT service. |
+
+These are orchestration endpoints published from Taxi saved queries. The HTTP method `POST` describes invoking the integration, not necessarily the downstream business method.
+
+### Downstream Taxi services
+
+| Logical service | Operation | Runtime target in this POC | Notes |
+|---|---|---|---|
+| `RabbitBridgeService` | `POST /publish` | `http://rabbit-bridge:8080` | Receives projected IDoc JSON and lineage headers; returns a publish receipt. |
+| `AdobeCustomerService` | `PUT /rest/V1/customers/{adobeCustomerId}` | Nebula | Sends `{ "customer": ... }`, lineage headers, and `X-Integration-Write: true`. |
+| `FwtCustomerService` | `POST /customer-accounts` | Nebula | Always uses HTTP POST; update intent is represented by `actionCode=UPDATE`. |
+
+### Bridge HTTP API
+
+#### `POST /publish`
+
+Accepted content types:
+
+- `application/json`: the body must contain exactly one `IDOC` object and is serialized to SAP XML;
+- `application/xml` or `text/xml`: the body is published as supplied after metadata validation.
+
+Responses:
+
+| Status | Meaning |
 |---|---|
-| `message_id` | Stable UUID for this event and its delivery retries. |
-| `correlation_id` | Stable across the paired Adobe → SAP → Adobe POC flow. |
-| `type` | Versioned event name, initially `customer-account.updated.v1`. |
-| `content_type` | `application/xml`. |
-| `delivery_mode` | `2` so an unconsumed message survives a broker restart with durable topology. |
-| `x-origin` | `adobe`, `sap`, or later `fwt`. |
-| `x-action` | `UPDATE`, or later `CREATE`. |
-| `x-schema` | Initially `sap.zbupa-cbo.v1`. |
-| `x-causation-id` | The inbound message ID that caused a deliberately new event. |
-| `x-adobe-customer-id` | POC-only reverse-route identity; carried as metadata and never inserted into the SAP IDoc. |
-| `x-integration-write` | Marks a target write that must not be re-emitted as a new source event. |
+| `202` | RabbitMQ confirmed a routable publish. This does not mean every asynchronous consumer has completed. |
+| `400 INVALID_SAP_PAYLOAD` | The projected JSON envelope is malformed. |
+| `400 INVALID_ROUTE_METADATA` | Required lineage or route metadata is missing, malformed, or inconsistent. |
+| `400 EMPTY_BODY` | No request body was supplied. |
+| `415 UNSUPPORTED_MEDIA_TYPE` | The content type is not one of the three supported values. |
+| `503 UNROUTABLE` | `mandatory=true` found no matching queue binding. |
+| `503 PUBLISH_FAILED` | RabbitMQ NACKed the message or the AMQP connection failed. |
 
-The routing key is authoritative for routing. The bridge must validate that `x-origin` and `x-action` agree with it before calling Orbital.
+#### `GET /health`
 
-## Orbital endpoints, bridge, and HTTP stubs
+The endpoint returns:
 
-Expose these saved-query ingress operations:
+- HTTP `200` with `status=ok` when the configured consumer thread is running and connected;
+- HTTP `503` with `status=degraded` and `last_error` when the consumer is not connected;
+- HTTP `200` with `consumer.enabled=false` when consumer startup is explicitly disabled.
 
-| Operation | POC endpoint | Caller and input | Side effect |
-|---|---|---|---|
-| Adobe → SAP | `POST /api/q/customer-account/from-adobe` | Test client; Adobe JSON body plus typed lineage/action headers | Projects to SAP XML and calls the bridge publish operation. |
-| SAP → Adobe | `POST /api/q/customer-account/from-sap` | `rabbit-bridge`; raw SAP XML plus AMQP metadata mapped to typed headers | Projects to Adobe JSON and calls the Adobe stub. |
-| Adobe/SAP → FWT | `POST /api/q/customer-account/to-fwt` | Either FWT worker; structurally equivalent IDoc JSON plus typed headers | Reuses one Taxi projection to create FWT JSON and call the FWT stub. |
+### HTTP lineage headers
 
-Using `POST` for POC ingress keeps transport separate from the business action. These are orchestration endpoints, not replicas of Adobe's or SAP's public APIs.
-
-Define these downstream HTTP write operations in Taxi:
-
-- Rabbit bridge publish: accepts `sap.ZbupaCustomerAccountPublishRequest` JSON plus typed HTTP lineage headers; the bridge structurally serializes the object to `ZBUPA_CBO` XML, maps the headers to AMQP metadata, and publishes it with routing key `customer-account.adobe.updated`. The endpoint also accepts already-serialized XML for transport smoke tests.
-- Adobe stub: `PUT /rest/V1/customers/{adobeCustomerId}` with an `adobe.AdobeCustomerWriteRequest` JSON body.
-- FWT stub: `POST /customer-accounts` with an unwrapped `fwt.FwtCustomerAccount` JSON body.
-
-The thin `rabbit-bridge` is required because the Orbital image used by this workspace does not expose a documented RabbitMQ/AMQP Taxi connector. It has two transport-only responsibilities:
-
-1. Expose an HTTP endpoint that accepts Orbital's structured SAP JSON envelope (or raw XML), performs only SAP XML wire serialization when needed, publishes it to `poc.customer-account.events` over AMQP, and returns success only after a publisher confirm and confirmation that the message was routed.
-2. Consume one configured route queue per process and post it to the configured Orbital saved query. The SAP → Adobe worker preserves raw XML. The two FWT workers perform a reversible XML-to-IDoc-JSON format adaptation to avoid Orbital 0.38's concurrent XML parser limitation; this code does not rename, derive, or map customer facts.
-
-The bridge does not derive or map customer values. It acknowledges a Rabbit delivery only after Orbital returns success. Invalid metadata, malformed input that Orbital rejects, or any downstream non-2xx is rejected without requeue so RabbitMQ dead-letters it immediately. The current consumer uses `prefetch=1`; it has no retry stage. Ordering and retry queues are later hardening work.
-
-Use Orbital HTTP service URL overrides in `orbital/config/services.conf`, so Taxi service contracts refer to stable service names such as `rabbit-bridge` and `adobe-stub` rather than local ports. Nebula remains suitable for the Adobe and FWT HTTP stubs; it is not the RabbitMQ transport.
-
-RabbitMQ's management HTTP publish and queue `get` endpoints are not the integration path. They are useful for manual fixture publishing and inspection, but RabbitMQ documents them as inefficient or development/troubleshooting operations. The bridge uses AMQP for continuous transport.
-
-## Docker Compose and workspace setup
-
-The runtime setup is implemented in the sibling `../orbital` support folder:
-
-- `docker-compose.yml` remains the generated base stack.
-- `docker-compose.override.yml` mounts this POC read-only, adds RabbitMQ 4.1.8, persists broker data, builds the bridge, and supplies its broker/route/Orbital settings.
-- `docker-compose.poc.yml` overrides host ports for the isolated `orbital-poc` project.
-- `workspace/workspace.conf` loads `/opt/service/projects/orbital-poc` with polling.
-- `rabbitmq/rabbitmq.conf` and `rabbitmq/definitions.json` import the vhost, user, permissions, exchanges, queues, bindings, and dead-letter topology.
-
-The same bridge image runs in three Compose services:
-
-| Compose service | Queue | Expected origin | Adobe ID required | Orbital path | Payload sent to Orbital |
-|---|---|---|---|---|---|
-| `rabbit-bridge` | `sap-to-adobe` | `sap` | yes | `/api/q/customer-account/from-sap` | raw XML |
-| `rabbit-bridge-adobe-to-fwt` | `adobe-to-fwt` | `adobe` | no | `/api/q/customer-account/to-fwt` | structurally equivalent JSON |
-| `rabbit-bridge-sap-to-fwt` | `sap-to-fwt` | `sap` | no | `/api/q/customer-account/to-fwt` | structurally equivalent JSON |
-
-The reusable settings are `RABBITMQ_CONSUMER_QUEUE`, `RABBITMQ_CONSUMER_ROUTING_PATTERN`, `RABBITMQ_CONSUMER_EXPECTED_ORIGIN`, `RABBITMQ_CONSUMER_REQUIRE_ADOBE_CUSTOMER_ID`, `ORBITAL_CONSUMER_PATH`, and `ORBITAL_CONSUMER_PAYLOAD_FORMAT`. The old SAP-to-Adobe environment names remain fallback aliases. Only the main bridge exposes a host port because the FWT services are queue workers, not public ingress APIs.
-
-`../orbital/rabbitmq/rabbitmq.conf` imports the topology deterministically:
-
-```properties
-definitions.import_backend = local_filesystem
-definitions.local.path = /etc/rabbitmq/definitions.json
-definitions.skip_if_unchanged = true
-```
-
-`../orbital/rabbitmq/definitions.json` declares the `poc` topology and includes the hash for the fixed local demo user. Definitions import owns that user, so the Compose values intentionally match `orbital` / `orbital-poc`; changing only environment variables will not replace the imported credentials.
-
-The base Compose configuration points Orbital at `/opt/service/workspace/workspace.conf`. The implemented file contains:
-
-```hocon
-file {
-  projects = [{
-    isEditable = false
-    path = "/opt/service/projects/orbital-poc"
-  }]
-  changeDetectionMethod = POLL
-  incrementVersionOnChange = false
-  pollFrequency = PT3S
-  recompilationFrequencyMillis = PT3S
-}
-```
-
-The base stack owns the `./workspace` mount; the override adds only the read-only POC project mount. The earlier runtime-collision decision is resolved: always combine `docker-compose.poc.yml` with project name `orbital-poc` as shown in the checkpoint commands. This keeps the unrelated `orbital-*` stack untouched.
-
-## Routing, acknowledgement, and loop prevention
-
-Apply these route policies:
-
-| Published route | Bound POC queue(s) | Must not receive it |
+| Header | Required | Meaning |
 |---|---|---|
-| `customer-account.adobe.*` | `poc.customer-account.adobe-to-sap`; `poc.customer-account.adobe-to-fwt` | Adobe |
-| `customer-account.sap.*` | `poc.customer-account.sap-to-adobe`; `poc.customer-account.sap-to-fwt` | SAP |
-| `customer-account.fwt.*` | None | Every main queue; there is no FWT on-ramp in BIP or this POC. |
+| `X-Message-Id` | yes | UUID identifying this event. Preserve it across delivery retries. |
+| `X-Correlation-Id` | yes | UUID grouping related events in the business flow. |
+| `X-Causation-Id` | no | UUID of the event that caused this deliberately new event. |
+| `X-System-Origin` | yes | `adobe` or `sap` for implemented routes. Must agree with the routing key. |
+| `X-Account-Action` | yes | `UPDATE`; create is not enabled. |
+| `X-Schema` | defaulted on publish | `sap.zbupa-cbo.v1`. |
+| `X-Event-Type` | defaulted on publish | `customer-account.updated.v1`. |
+| `X-Adobe-Customer-Id` | SAP-to-Adobe only | Explicit POC cross-reference used in the Adobe target URL. |
+| `X-Integration-Write` | target writes/optional transport fact | Marks a write created by the integration so a future on-ramp can suppress re-emission. |
 
-Current safeguards and remaining work are:
+Message, correlation, and optional causation IDs are validated as UUIDs by the bridge.
 
-1. **Implemented:** directional positive bindings prevent routing an event to its source queue.
-2. **Implemented:** the bridge rejects inconsistent routing-key/header combinations.
-3. **Partially implemented:** `x-integration-write=true` is carried to the Adobe write and the local stub never emits events, but no generic adapter enforcement exists yet.
-4. **Not implemented:** correlation and causation IDs are preserved, but there is no hop-count guard or durable idempotency store.
+### RabbitMQ message contract
 
-Origin filtering alone does not prevent Adobe → SAP → Adobe → SAP ping-pong if every applied write is re-emitted. In Phase 1 the SAP inbox has no automatic echo consumer: the return event is a separate, explicit SAP fixture.
+The Rabbit body is always SAP `ZBUPA_CBO` XML, even on an FWT subscription.
 
-The POC does not claim exactly-once delivery. It currently proves one target effect for one valid queue delivery and acknowledges only after success. There are no retries yet. A future retry must preserve the same `message_id`, and production idempotency needs a durable store keyed by `route + message_id`. In addition, Adobe and its later SAP confirmation can legitimately reach FWT through different queues with different message IDs; avoiding a duplicate business effect requires a separate business-key/version policy rather than transport-level message-ID deduplication.
+| AMQP property/header | Required | Value or meaning |
+|---|---|---|
+| routing key | yes | `customer-account.adobe.updated` or `customer-account.sap.updated`. |
+| `content_type` | yes | `application/xml`. |
+| `delivery_mode` | yes | `2`, making the message persistent when used with durable topology. |
+| `message_id` | yes | UUID. |
+| `correlation_id` | yes | UUID. |
+| `type` | yes | `customer-account.updated.v1`. |
+| `x-origin` | yes | Must equal the origin segment of the routing key. |
+| `x-action` | yes | Must be `UPDATE` and agree with routing suffix `updated`. |
+| `x-schema` | yes | `sap.zbupa-cbo.v1`. |
+| `x-causation-id` | no | UUID lineage link. |
+| `x-adobe-customer-id` | SAP-to-Adobe route only | Explicit Adobe identity. FWT routes do not require it. |
+| `x-integration-write` | no | Boolean integration-write marker. |
 
-## Current repository layout
+The parser recognizes the syntactic routing suffix `created`, but every implemented route applies `allowed_actions={UPDATE}` and the Taxi business enum contains only `UPDATE`. A create event is therefore rejected.
+
+## Delivery, failure, and loop-prevention semantics
+
+### Publisher semantics
+
+- The bridge uses a thread lock around a reused Pika connection/channel.
+- Publisher confirms are enabled.
+- `mandatory=true` turns missing bindings into a visible `UNROUTABLE` response.
+- Messages use `delivery_mode=2` and the queues/exchanges are durable.
+- HTTP `202` proves broker acceptance and routing only; it does not wait for target consumers.
+
+### Consumer semantics
+
+- Each process owns one queue and passively declares it, so topology mistakes fail visibly instead of creating an accidental queue.
+- `prefetch=1` limits each worker to one unacknowledged delivery at a time.
+- `auto_ack=false` keeps the delivery unacknowledged during validation, Orbital projection, and target HTTP execution.
+- A 2xx from Orbital causes `basic.ack`.
+- Invalid metadata, structural conversion failure, HTTP exception, or non-2xx causes `basic.reject(requeue=false)`.
+- RabbitMQ then routes the message through the DLX to that route's DLQ.
+- There is no automatic retry stage, retry backoff, or automated replay.
+
+### Loop prevention
+
+The POC uses several independent controls:
+
+1. Positive topic bindings route Adobe events only to SAP/FWT subscriptions and SAP events only to Adobe/FWT subscriptions.
+2. No queue is bound to `customer-account.fwt.*`.
+3. The bridge validates that routing key, origin header, action header, schema, event type, and worker configuration agree.
+4. Target Taxi services send `X-Integration-Write: true`.
+5. The Nebula stubs do not emit new source events.
+6. The simulated SAP queue does not automatically publish a return event; a SAP-origin fixture is a separate explicit action with its own lineage.
+
+These controls prevent transport echo in the POC. They do not provide production idempotency. An Adobe event followed later by its SAP confirmation can legitimately create two FWT POSTs through different queues. That is fan-out, not a message loop, but a business-key/version deduplication decision is required if only one FWT effect is acceptable.
+
+## Repository layout and file-by-file reference
+
+The Git repository contains 41 meaningful source/configuration/fixture files. `.git`, virtual environments, bytecode, pytest caches, and Ruff caches are excluded from this inventory because they are generated artifacts.
 
 ```text
 orbital-poc/
+├── .gitignore
 ├── README.md
 ├── taxi.conf
+├── orbital/
+│   ├── config/
+│   │   └── services.conf
+│   └── nebula/
+│       └── customer-account.nebula.kts
 ├── src/
 │   ├── taxonomy/
 │   │   ├── customer-account-types.taxi
@@ -543,252 +792,976 @@ orbital-poc/
 │   │   ├── adobe-customer-account.taxi
 │   │   ├── sap-customer-account.taxi
 │   │   └── fwt-customer-account.taxi
-│   ├── services/
-│   │   ├── adobe-customer-service.taxi
-│   │   ├── rabbit-bridge-service.taxi
-│   │   └── fwt-customer-service.taxi
-│   └── queries/
-│       ├── adobe-to-sap.taxi
-│       ├── sap-to-adobe.taxi
-│       └── idoc-to-fwt.taxi
+│   ├── queries/
+│   │   ├── adobe-to-sap.taxi
+│   │   ├── sap-to-adobe.taxi
+│   │   └── idoc-to-fwt.taxi
+│   └── services/
+│       ├── rabbit-bridge-service.taxi
+│       ├── adobe-customer-service.taxi
+│       └── fwt-customer-service.taxi
 ├── rabbit-bridge/
-│   ├── app/                                   # publisher, reusable consumer, metadata, XML/JSON adapters
-│   ├── tests/                                 # 41 unit/component tests
-│   └── Dockerfile
-├── orbital/                                     # Taxi additionalSources, not the sibling stack
-│   ├── config/services.conf
-│   └── nebula/customer-account.nebula.kts
+│   ├── .dockerignore
+│   ├── .gitignore
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── requirements-dev.txt
+│   ├── pytest.ini
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── config.py
+│   │   ├── metadata.py
+│   │   ├── sap_xml.py
+│   │   ├── publisher.py
+│   │   ├── consumer.py
+│   │   └── main.py
+│   └── tests/
+│       ├── test_config.py
+│       ├── test_metadata.py
+│       ├── test_sap_xml.py
+│       ├── test_publisher.py
+│       ├── test_consumer.py
+│       └── test_http_publish.py
 └── test-data/
     ├── adobe-update.json
     ├── expected-sap-update.xml
     ├── sap-update.xml
     ├── expected-adobe-update.json
-    ├── rabbit-message-metadata.json
-    └── expected-fwt-update.json
-
-../orbital/
-├── docker-compose.yml                         # Generated; do not customize
-├── docker-compose.override.yml                # RabbitMQ, bridge, POC mount
-├── docker-compose.poc.yml                     # Isolated host-port overrides
-├── rabbitmq/
-│   ├── rabbitmq.conf
-│   └── definitions.json
-└── workspace/workspace.conf
+    ├── expected-fwt-update.json
+    └── rabbit-message-metadata.json
 ```
 
-`taxi.conf` includes `@orbital/config` and `@orbital/nebula`. Nebula remains local/test-only. Every path shown above is implemented.
+### Root files
 
-## Implementation sequence
-
-### 1. Reset and build the taxonomy
-
-Status: **complete for the Phase 1 field slice**.
-
-- Delete `src/users.taxi`.
-- Add the core semantic types and strict business enums.
-- Add distinct Adobe and SAP IDs.
-- Add typed saved-query inputs for message, correlation, causation, origin, action, and the temporary Adobe identity parameter.
-- Add synthetic paired fixtures with stable values and no PII.
-- Replace primitive model fields with shared business types or system-owned wire/protocol types; keep email and post flags distinct to avoid ambiguous same-type facts.
-- Validate with Taxi 1.72 (`0` errors, `0` warnings, `0` saved-query errors), Orbital package health, and both live fixture directions.
-
-Exit: **passed for the Phase 1 contracts.** No model field is typed as a bare `String`, `Int`, `Boolean`, or `Any`; the live outputs still match `expected-sap-update.xml` and `expected-adobe-update.json`.
-
-### 2. Add RabbitMQ and the transport bridge
-
-Status: **complete for the current Adobe, SAP, and FWT queue topology**.
-
-- Add RabbitMQ to `../orbital/docker-compose.override.yml` on `nebula_network`.
-- Mount this Taxi project into the Orbital container and add it to `workspace.conf`.
-- Declare the exchange, directional queues, bindings, DLX, and DLQs in `definitions.json`.
-- Implement the bridge HTTP publish endpoint and the SAP-origin AMQP consumer.
-- Preserve AMQP metadata when forwarding to Orbital.
-- Acknowledge after Orbital success; reject without requeue on terminal failure.
-- Validate the effective Compose model with `docker compose config` before starting it.
-
-Exit evidence: RabbitMQ is healthy, its isolated management UI is reachable at `http://localhost:25673`, all current topology exists, Orbital loads this Taxi project, and raw SAP XML traverses the consumer without customer transformation inside the bridge.
-
-### 3. Implement Adobe → SAP update
-
-Status: **core flow complete and live-verified**.
-
-- Describe the required Adobe JSON subset.
-- Describe the required `ZBUPA_CBO` XML subset.
-- Implement `UPDATE → MSGFN=004` and `KTOKD=1`.
-- Map the Phase 1 fields and the local title/status/contact-preference lookups.
-- Add the bridge publish HTTP write operation using the SAP publish model. The current Orbital 0.38 workaround sends structured JSON and lets the transport bridge perform XML wire serialization.
-- Publish the `from-adobe` saved query.
-
-Exit: the Adobe fixture produces one message in `poc.customer-account.adobe-to-sap`; its body is the expected SAP XML and its routing key, content type, message ID, correlation ID, origin, action, and schema metadata are correct.
-
-### 4. Implement SAP → Adobe update
-
-Status: **core flow complete and live-verified; the `KTOKD != 1` handled-skip guard remains**.
-
-- Parse the SAP XML model directly with Orbital's XML format.
-- Reject or visibly skip `KTOKD != 1`.
-- Implement `MSGFN=004 → UPDATE`.
-- Receive `AdobeCustomerId` through the documented POC-only header; replace it with the authoritative cross-reference before production connectivity.
-- Map the Phase 1 fields and wrap them as `{ "customer": ... }`.
-- Add the Adobe `PUT` write operation and capture stub.
-- Publish the `from-sap` saved query.
-- Configure the bridge to consume `poc.customer-account.sap-to-adobe` and forward the XML plus metadata to that query.
-
-Exit: publishing the SAP XML fixture with routing key `customer-account.sap.updated` results in one captured Adobe `PUT` at the expected path and the Rabbit delivery is acknowledged.
-
-### 5. Prove the controlled round trip
-
-Status: **partial**. The valid forward and reverse fixtures, topology isolation, acknowledgement path, leading-zero ID, and core `ACTIVE`/email-and-post mapping are proven. The remaining bullets and Phase 1 gate items below are not all complete.
-
-- Compare the selected semantic facts after Adobe → SAP → Adobe fixture projection.
-- Assert the Adobe and SAP ID types never substitute for one another implicitly.
-- Inspect the SAP-inbox message, then publish a separate paired SAP event with a new message ID, the same correlation ID, and the first message as its causation ID.
-- Assert topic bindings do not deliver an event to its source-system queue.
-- Assert inconsistent routing keys and `x-origin` headers are rejected.
-- Test status, contact preference, title, date, optional second street line, and leading-zero SAP ID cases.
-- Force malformed XML and an Adobe HTTP failure and verify the failed delivery reaches the route DLQ with its metadata intact.
-- Record transformation/query traces from Orbital as POC evidence.
-
-Phase 1 exit gate:
-
-- [x] Orbital compiles and loads the Taxi project without schema errors.
-- [x] RabbitMQ, the bridge, Orbital, Nebula, and the Adobe stub are healthy.
-- [x] Both ingress routes succeed for valid update fixtures.
-- [x] Adobe → SAP creates exactly one persistent message in the SAP inbox queue for one invocation.
-- [x] SAP → Adobe creates exactly one Adobe target call and acknowledges the queue delivery.
-- [x] Directional bindings make zero echo deliveries.
-- [ ] `KTOKD != 1` is visibly skipped.
-- [ ] Malformed XML and a live Adobe `500` are observable in the expected DLQ with metadata intact. Basic invalid-metadata DLQ routing is already proven.
-- [ ] All Phase 1 fields and enum permutations are recorded as semantically equivalent in an automated paired round-trip report. The core fixture values are already proven in each direction.
-- [x] No test depends on production credentials or personal data.
-
-### 6. Add FWT
-
-Status: **core flow implemented and live-verified for both Adobe and SAP origins**.
-
-- Added the FWT-owned request/response contract using the existing identity, person, contact, address, status, action, type, group, and preference facts.
-- Added deterministic Taxi expressions for display name, `yyyyMMdd` → `yyyy-MM-dd`, and the two FWT contact booleans.
-- Added `POST /customer-accounts` to the FWT Nebula stub and registered `fwt-stub` in `services.conf`.
-- Added `poc.customer-account.adobe-to-fwt` and `poc.customer-account.sap-to-fwt`, their positive origin bindings, and one supporting DLQ per route.
-- Generalized the bridge consumer so the same image runs as separate Adobe → FWT and SAP → FWT workers.
-- Added the shared `/api/q/customer-account/to-fwt` saved query and `expected-fwt-update.json`.
-- Preserved the Rabbit body as SAP XML. FWT workers structurally adapt it to the equivalent JSON envelope before Orbital to avoid the runtime's concurrent XML-parser defect.
-- Live-asserted identical expected FWT JSON for each origin, including the unmodified `00010001` string ID, `UPDATE` action code, account type/group, address, birth date, and contact preferences.
-
-Phase 2 exit gate:
-
-- [x] Existing Adobe ↔ SAP behavior remains green.
-- [x] One SAP-confirmed event is copied to the independent Adobe and FWT queues and creates exactly one call to each target.
-- [x] One Adobe-origin event is copied to the independent SAP and FWT queues and creates one FWT call.
-- [x] FWT-origin events have no binding and create no delivery.
-- [x] FWT's `actionCode` represents update while the HTTP method remains `POST`.
-- [x] The deterministic slice does not generate missing timestamps or money values.
-- [ ] Add missing-date validation and the remaining reference-data, timestamps, money, bank, partner, and flag fields before claiming full FWT parity.
-- [ ] Decide whether Adobe plus SAP-confirmation duplicates should be accepted, correlated, or suppressed before production connectivity.
-
-### 7. Harden only after the semantic POC
-
-Status: **not started**, except that publisher confirms and basic health/logging already exist in the bridge.
-
-- Add create behavior and decide how the SAP-assigned customer number is correlated back to Adobe.
-- Replace local reference fixtures with an authoritative source.
-- Add the remaining money, bank, partner, and custom-attribute fields.
-- Add a durable idempotency store keyed by `route + message_id`.
-- Reconnect and retry one publish when RabbitMQ closes a stale idle publisher connection; the current bridge resets it only after returning the first `503`, so a second request succeeds.
-- Design retry queues, ordering rules, replay tooling, publisher confirms, and observability.
-- Evaluate replacing the bridge if a supported RabbitMQ connector is supplied for the deployed Orbital edition.
-- Define business-level FWT deduplication/versioning now that both production-parity origins are enabled.
-
-## Acceptance scenarios
-
-| ID | Scenario | Expected result | Status and evidence at 2026-07-29 |
-|---|---|---|---|
-| T1 | Start from an empty RabbitMQ data volume | Definitions import creates the durable exchange, queues, bindings, DLX, and DLQs. | **Passed.** Exercised with an isolated validation broker. |
-| T2 | Restart RabbitMQ after publishing a persistent test message | Durable topology and the unconsumed persistent message remain available. | **Passed.** Persistent message and topology survived restart. |
-| T3 | Publish Adobe-, SAP-, and unapproved-origin routes | Each positive binding receives only its approved origin; an unbound route reaches no main queue. | **Passed.** Directional and unapproved routing were inspected on the validation broker. |
-| A1 | Valid Adobe individual update | One SAP-inbox message; XML has `MSGFN=004`, `KTOKD=1`, and expected core fields. | **Passed.** Live body matched `expected-sap-update.xml` semantically; persistent AMQP properties and headers matched the fixture contract. |
-| A2 | Adobe request missing `sap_unique_id` | Validation failure; no Rabbit message is published. | **Pending live acceptance test.** |
-| A3 | Adobe request marked `origin=sap` | `INVALID_ROUTE_METADATA`; no Rabbit message is published. | **Partial.** Bridge metadata behavior has unit coverage; add a live saved-query assertion. |
-| S1 | Valid SAP individual update published as `customer-account.sap.updated` | One Adobe `PUT`; expected path/body; Rabbit delivery acknowledged. | **Passed.** Rabbit recorded one publish and one acknowledgement; Nebula captured the expected path and full nested JSON body. |
-| S2 | SAP `KTOKD` is not `1` | Visible skip; no Adobe call; Rabbit delivery acknowledged as handled. | **Pending implementation and test.** Current reverse query does not guard this field. |
-| S3 | SAP route and `x-origin` disagree | `INVALID_ROUTE_METADATA`; no Orbital target call; delivery dead-lettered. | **Passed at bridge/topology level.** Unit coverage plus live validation-broker DLQ check; preserve this in an automated stack test. |
-| Q1 | Malformed SAP XML | No target call; delivery appears in `sap-to-adobe.dlq` with IDs intact. | **Pending live acceptance test.** |
-| Q2 | Adobe target returns HTTP 500 | Delivery is rejected without requeue and reaches `sap-to-adobe.dlq`. | **Partial.** Consumer non-2xx rejection has unit coverage; live Adobe-500/DLQ evidence remains. |
-| R1 | Paired Adobe/SAP update fixtures | Selected semantic fields compare equal after both projections. | **Partial.** Both valid projections match their expected fixtures; add one automated paired semantic report with lineage assertions. |
-| R2 | SAP number has leading zeroes | Original `SapCustomerNumber` is preserved. | **Passed** for `00010001` in both live projections. |
-| R3 | Each status and preference value | Expected code/boolean mapping in both directions. | **Partial.** `ACTIVE` and email-and-post are live-proven; all remaining permutations are pending. |
-| F1 | Valid SAP-origin update | One message reaches each SAP-origin subscription; exactly one Adobe call and one FWT `POST`; both deliveries are acknowledged. | **Passed.** Live fan-out produced both target captures, the FWT body matched `expected-fwt-update.json`, and both main queues plus DLQs returned to zero. |
-| F2 | Valid Adobe-origin update | One SAP-inbox copy and one Adobe-origin FWT delivery; FWT `POST` matches the expected fixture. | **Passed.** The FWT worker acknowledged its copy and the captured body matched exactly. |
-| F3 | Publish an FWT-origin routing key | No main queue receives it. | **Passed.** There is no `customer-account.fwt.*` binding or FWT publisher/on-ramp. |
-
-## Decisions needed before production connectivity
-
-1. Identity cross-reference: what authoritative source maps `SapCustomerNumber` to `AdobeCustomerId`? The current reverse BIP path uses `KUNNR` in the Adobe URL, while the forward path obtains `KUNNR` from Adobe's `sap_unique_id` custom attribute.
-2. Create correlation: how is a SAP-assigned `KUNNR` returned and associated with the Adobe account after `MSGFN=009`?
-3. Reference data: should title, sales district, customer group, region, and other code translations remain in Azure Table storage, move into taxonomy enums, or be exposed as a lookup service?
-4. FWT duplicate policy: when Adobe and a later SAP confirmation represent the same change, should FWT accept both effects or suppress one using a customer/version business key?
-5. Bridge ownership: which runtime and team own the HTTP/AMQP adapter, and is a supported native Orbital RabbitMQ connector available in the target edition?
-6. Delivery guarantees: where should `route + message_id` idempotency be persisted, and which failures are retried before dead-lettering?
-7. Runtime placement: which deployed environment should host Orbital, RabbitMQ, and the bridge? Local replacement is no longer an open question; the POC runs as isolated project `orbital-poc` on non-conflicting ports.
-
-## Known BIP behavior to preserve or correct deliberately
-
-- Adobe create maps to SAP `MSGFN=009`; update maps to `004`.
-- Adobe supports only individual accounts in this path; SAP → Adobe skips other `KTOKD` values.
-- Adobe → SAP selects the first default billing address.
-- Adobe `created_at` is parsed as `yyyy-MM-dd HH:mm:ss` before populating SAP date/time fields.
-- Status and contact preferences use explicit code tables.
-- BIP's contact flag representations are asymmetric; the POC normalizes them.
-- Some fields are one-way only. In particular, credit limit, sales block, and account-manager employee ID are mapped SAP → Adobe, while currency is read Adobe → SAP but is not mapped back.
-- CPA consent, default card, and monthly payment are present in local mapping code but are omitted by a later canonical-to-IDoc pass-through; they are not Phase 1 proven fields.
-- FWT always uses `POST`; create/update intent is carried in `actionCode`.
-- Existing FWT date fallbacks and country-as-currency fallback are not to be copied silently.
-
-## Intentional POC transport differences
-
-- Production BIP uses Azure Service Bus and a SAP managed connector; the POC uses RabbitMQ and raw SAP XML.
-- RabbitMQ positive topic bindings replace Service Bus SQL expressions with negative `SystemOrigin` filters.
-- A thin bridge adapts HTTP to AMQP because the current local Orbital stack has no configured supported RabbitMQ connector; it is not a business-mapping service.
-- The fake SAP inbox does not automatically emit a SAP response. The paired return fixture is published explicitly.
-- The POC explicitly implements the Adobe- and SAP-origin portions of BIP's broad FWT subscription. It does not add Hybris or invent an FWT-origin customer-account route.
-- FWT workers use structural XML-to-JSON adaptation before Orbital because Orbital 0.38 fails when two XML saved-query requests parse concurrently; the Rabbit wire body remains XML and all business mapping remains in Taxi.
-- Basic DLQs are in scope, but automated retries, replay tooling, high availability, and production idempotency are not.
-
-## BIP evidence
-
-| Concern | Authoritative source |
+| File | What it does and why it exists |
 |---|---|
-| Adobe on-ramp, metadata and publish | [`la-bip-adobe-customeraccount/LogicApp.json`](../bip/la-bip-adobe-customeraccount/LogicApp.json) |
-| Adobe contract | [`AccountCreation.cs`](../bip/bbr.bip.Schema/AccountCreation.cs) |
-| Adobe → SAP business mapping | [`MapCreateAccountToIdoc.cs`](../bip/bbr.bip.Mapping/MapCreateAccountToIdoc.cs) |
-| Topic subscriptions and origin filters | [`AddMessageTypes.ps1`](../bip/bbr.bip.deploy/AddMessageTypes.ps1) |
-| SAP off-ramp and connector call | [`la-bip-customeraccount-sap/LogicApp.json`](../bip/la-bip-customeraccount-sap/LogicApp.json) |
-| SAP gateway | [`la-bip-sap-gateway-customeraccount/LogicApp.json`](../bip/la-bip-sap-gateway-customeraccount/LogicApp.json) |
-| SAP on-ramp | [`la-bip-sap-customeraccount/LogicApp.json`](../bip/la-bip-sap-customeraccount/LogicApp.json) |
-| SAP XML contract | [`ZBUPA_CBO.XSD`](../bip/bbr.bip.Schema/ZBUPA_CBO.XSD) |
-| SAP → Adobe mapping and filter | [`ZBUPA_CBOService.cs`](../bip/bbr.bip.productservices/ZBUPA_CBOService.cs) |
-| Adobe HTTP target calls | [`AdobeDataService.cs`](../bip/bbr.bip.productservices/AdobeDataService.cs) |
-| FWT off-ramp | [`la-bip-customeraccount-fwt/LogicApp.json`](../bip/la-bip-customeraccount-fwt/LogicApp.json) |
-| FWT contract | [`AccountCreationFWT.cs`](../bip/bbr.bip.Schema/AccountCreationFWT.cs) |
-| SAP → FWT mapping | [`ZBUPA_CBOServiceFwt.cs`](../bip/bbr.bip.productservices/ZBUPA_CBOServiceFwt.cs) |
-| FWT HTTP target call | [`FineWineDataServices.cs`](../bip/bbr.bip.productservices/FineWineDataServices.cs) |
+| `.gitignore` | Excludes Python bytecode, virtual environments, and pytest/Ruff caches so bridge-generated artifacts do not pollute the Taxi repository. |
+| `README.md` | This architecture, operations, testing, troubleshooting, and continuation guide. It is intended to be sufficient for a new engineer to understand and resume the POC. |
+| `taxi.conf` | Defines package `com.lalit/orbital-poc` version `0.1.0`, uses `src/` as the Taxi source root, and includes project-local service configuration and Nebula scripts as additional Orbital sources. |
 
-## Orbital and Taxi references
+### Orbital-specific files
 
-- [Taxi models and model modifiers](https://taxilang.org/docs/language/models)
-- [Describing HTTP services in Taxi](https://orbitalhq.com/docs/describing-data-sources/http)
-- [Performing write mutations](https://orbitalhq.com/docs/querying/mutations)
-- [Publishing saved queries as HTTP endpoints](https://orbitalhq.com/docs/querying/queries-as-endpoints)
-- [Reading and writing XML](https://orbitalhq.com/docs/data-formats/xml)
-- [Overriding service URLs](https://orbitalhq.com/docs/describing-data-sources/configuring-connections)
-- [Stubbing services with Nebula](https://orbitalhq.com/docs/testing/stubbing-services)
-- [Installing and running Taxi/Orbital](https://orbitalhq.com/docs/guides/installing)
-- [Orbital local-disk workspace configuration](https://orbitalhq.com/docs/workspace/connecting-a-disk-repo)
-- [RabbitMQ exchanges, topic routing, and bindings](https://www.rabbitmq.com/docs/exchanges)
-- [RabbitMQ consumer acknowledgements](https://www.rabbitmq.com/docs/confirms)
+| File | What it does and why it exists |
+|---|---|
+| `orbital/config/services.conf` | Maps Taxi logical service names `rabbit-bridge`, `adobe-stub`, and `fwt-stub` to Docker-network URLs. This separates environment addresses from Taxi contracts. Both target stubs resolve to Nebula using the runtime-provided `${NEBULA_HTTP_PORT}`. |
+| `orbital/nebula/customer-account.nebula.kts` | Defines the Adobe PUT and FWT POST test endpoints, logs exact request bodies, and returns deterministic JSON. It provides observable downstream behavior without real credentials or side effects. |
+
+### Taxi taxonomy files
+
+| File | What it does and why it exists |
+|---|---|
+| `src/taxonomy/customer-account-types.taxi` | Declares reusable semantic scalar facts for lineage, identities, person/contact/address data, distinct address-role booleans, and transport result fields. Narrow types prevent accidental mapping based only on primitive type compatibility. |
+| `src/taxonomy/customer-account-enums.taxi` | Declares system-neutral origin, action, status, group, type, contact-preference, and consent meanings. Adobe, SAP, and FWT enums link their wire values to these meanings with `synonym`. |
+
+### Taxi contract files
+
+| File | What it does and why it exists |
+|---|---|
+| `src/contracts/adobe-customer-account.taxi` | Models Adobe JSON ingress and Adobe write shapes. Adobe-owned IDs and custom-attribute keys remain local. `jsonPath` fields expose SAP number, status, consent, and default billing-address facts hidden inside arrays. Expressions combine email/post flags into one semantic preference. Write models reconstruct the exact `{ "customer": ... }` target payload and string-valued custom attributes. |
+| `src/contracts/sap-customer-account.taxi` | Models SAP IDoc XML attributes, control record, customer segments, defaults, and code enums. It links SAP codes to shared facts and defines separate `@Xml` ingress and plain publish envelopes to work around Orbital XML runtime limitations without duplicating business rules. |
+| `src/contracts/fwt-customer-account.taxi` | Defines the deterministic first FWT output slice and FWT-owned wire enums. Taxi derives display name, reformats date of birth, expands contact preference into email/post booleans, and constructs nested address/customer structures. Runtime timestamps, money, banks, and unsupported reference descriptions are intentionally omitted. |
+
+### Taxi query files
+
+| File | What it does and why it exists |
+|---|---|
+| `src/queries/adobe-to-sap.taxi` | Publishes `POST /api/q/customer-account/from-adobe`. It supplies Adobe JSON and lineage facts to Taxi and calls `RabbitBridgeService`, keeping Adobe-to-SAP business projection inside Orbital. |
+| `src/queries/sap-to-adobe.taxi` | Publishes `POST /api/q/customer-account/from-sap`. It accepts raw XML plus transport headers and requires an explicit Adobe ID before calling the Adobe service. The explicit ID avoids treating SAP and Adobe identifiers as interchangeable. |
+| `src/queries/idoc-to-fwt.taxi` | Publishes shared endpoint `POST /api/q/customer-account/to-fwt`. Both FWT workers invoke the same projection because both queues carry the same SAP IDoc business content. |
+
+### Taxi service files
+
+| File | What it does and why it exists |
+|---|---|
+| `src/services/rabbit-bridge-service.taxi` | Describes Orbital's outbound bridge `POST /publish`, including typed request/receipt and fixed schema/event headers. It is the explicit boundary between Taxi semantic projection and AMQP transport. |
+| `src/services/adobe-customer-service.taxi` | Describes the Adobe customer PUT, path variable, typed request/response, lineage, JSON content type, and integration-write marker. Orbital uses it as the target for SAP-to-Adobe projection. |
+| `src/services/fwt-customer-service.taxi` | Describes the FWT customer-account POST, typed request/response, lineage, JSON content type, and integration-write marker. Orbital materializes the FWT contract before invoking it. |
+
+### Bridge packaging files
+
+| File | What it does and why it exists |
+|---|---|
+| `rabbit-bridge/.dockerignore` | Removes tests, caches, bytecode, and local virtual environments from the Docker build context and runtime image. |
+| `rabbit-bridge/.gitignore` | Provides bridge-local cache and bytecode exclusions in addition to the root ignore file. |
+| `rabbit-bridge/Dockerfile` | Builds a Python 3.12 slim image, installs production dependencies only, creates UID 10001, runs as a non-root user, exposes port 8080, and starts `python -m app.main`. |
+| `rabbit-bridge/requirements.txt` | Bounds the production libraries: FastAPI/Uvicorn for HTTP, Pika for AMQP, and HTTPX for forwarding to Orbital. |
+| `rabbit-bridge/requirements-dev.txt` | Includes production dependencies plus pytest and Ruff for local checks. |
+| `rabbit-bridge/pytest.ini` | Restricts discovery to `tests/` and enables quiet test output. |
+
+### Bridge application files
+
+| File | What it does and why it exists |
+|---|---|
+| `rabbit-bridge/app/__init__.py` | Marks `app` as a Python package and documents its transport-only responsibility. |
+| `rabbit-bridge/app/config.py` | Defines immutable, environment-driven settings with boolean, integer, float, and enum-like validation. Generic consumer settings let one image run all three worker roles; legacy SAP-to-Adobe aliases preserve compatibility. |
+| `rabbit-bridge/app/metadata.py` | Defines the transport contract. It parses exact routing keys, implements Rabbit topic-pattern matching, validates UUIDs and origin/action/schema/event consistency, validates persistent XML AMQP properties, handles the conditional Adobe cross-reference, and converts HTTP headers to AMQP metadata and back to Orbital headers. |
+| `rabbit-bridge/app/sap_xml.py` | Implements strict structural IDoc JSON-to-XML and XML-to-JSON conversion. It understands `BEGIN` and `SEGMENT` attributes, omits null elements, preserves scalar strings and repeated children, escapes XML, and rejects unsupported envelopes. It contains no customer business mapping. |
+| `rabbit-bridge/app/publisher.py` | Implements the locked Pika publisher, connection reuse, publisher confirms, mandatory routing, persistent message properties, and specific unroutable/NACK/AMQP errors. |
+| `rabbit-bridge/app/consumer.py` | Implements consumer state, reconnect behavior, passive queue checking, prefetch, route validation, optional XML-to-JSON adaptation, HTTP forwarding, ACK-after-2xx, and reject-without-requeue behavior. |
+| `rabbit-bridge/app/main.py` | Composes the FastAPI application. Lifespan starts/stops consumer and publisher resources; `/health` exposes consumer state; `/publish` validates content and metadata, performs structural serialization, calls the publisher in a threadpool, and returns precise HTTP errors. Module execution starts Uvicorn. |
+
+### Bridge test files
+
+| File | What it proves and why it exists |
+|---|---|
+| `rabbit-bridge/tests/test_config.py` | Proves generic worker environment variables, legacy fallbacks and precedence, default XML forwarding, and rejection of unsupported payload formats. |
+| `rabbit-bridge/tests/test_metadata.py` | Proves positive HTTP/AMQP UUID-lineage mapping, route/origin/action mismatch rejection, the SAP-to-Adobe Adobe-ID requirement, relaxed FWT identity policy, and configured-origin mismatch rejection. The implementation also validates bad UUIDs, schema, event type, and persistence, but dedicated negative tests for those cases remain to be added. |
+| `rabbit-bridge/tests/test_sap_xml.py` | Proves XML attributes, null omission, escaping, leading-zero/string preservation, repeated-element handling, and rejection of malformed JSON/XML envelopes. |
+| `rabbit-bridge/tests/test_publisher.py` | Proves publisher confirms, mandatory routing, exchange/key selection, persistence, XML content type, and metadata propagation. |
+| `rabbit-bridge/tests/test_consumer.py` | Proves ACK-after-success only, reject/no-requeue failure behavior, invalid-route short circuit, route-specific identity policy, raw XML forwarding, and FWT XML-to-JSON forwarding. |
+| `rabbit-bridge/tests/test_http_publish.py` | Exercises FastAPI `/publish` and `/health`: raw XML, projected JSON serialization, invalid metadata/payload behavior, unroutable publishing, disabled-consumer health, and resource lifecycle. |
+
+### Test fixture files
+
+| File | What it represents and why it exists |
+|---|---|
+| `test-data/adobe-update.json` | Synthetic Adobe ingress fixture with nested default billing address and custom attributes. It is the source for Adobe-to-SAP and Adobe-origin FWT smoke tests. |
+| `test-data/expected-sap-update.xml` | Expected SAP IDoc projected from the Adobe fixture. Its `SNDPRN=BIP` represents an integration-generated inbound SAP message. |
+| `test-data/sap-update.xml` | Synthetic SAP-origin IDoc used for SAP-to-Adobe and SAP-to-FWT tests. `SNDPRN=SAP` distinguishes the source fixture from the integration-generated expected document. |
+| `test-data/expected-adobe-update.json` | Exact Adobe `{ "customer": ... }` PUT body expected from the SAP fixture, including boolean consent strings. |
+| `test-data/expected-fwt-update.json` | Exact deterministic FWT POST body expected from either source origin, including formatted DOB and derived contact-preference booleans. |
+| `test-data/rabbit-message-metadata.json` | Companion AMQP metadata for manually publishing `sap-update.xml`: route, UUID lineage, event/schema, explicit Adobe cross-reference, and integration-write flag. Keeping metadata separate from XML documents the transport envelope clearly. |
+
+## Runtime configuration
+
+### A companion runtime folder is required
+
+This Git repository does not contain Docker Compose or RabbitMQ definitions. Runtime support lives outside Git in an `orbital` directory. Two different workspace-loading modes are currently in use and must not be mixed.
+
+#### Development bind-mount mode
+
+The development stack at `C:\dev\bbnr` uses sibling directories:
+
+```text
+C:\dev\bbnr\
+├── orbital/
+│   ├── docker-compose.yml
+│   ├── docker-compose.override.yml
+│   ├── docker-compose.poc.yml
+│   ├── rabbitmq/
+│   │   ├── rabbitmq.conf
+│   │   └── definitions.json
+│   └── workspace/
+│       └── workspace.conf
+└── orbital-poc/
+    └── ...this repository...
+```
+
+In this mode the directories must be siblings unless the two relative paths in `docker-compose.override.yml` are changed:
+
+- `../orbital-poc` is mounted read-only into Orbital;
+- `../orbital-poc/rabbit-bridge` is the bridge Docker build context.
+
+This is the mode used by the isolated-port commands in this README.
+
+#### Existing Git-workspace mode
+
+The running installation at `C:\Users\lalit\orbital` is different. Its `workspace/workspace.conf` tells Orbital to poll the Git repository on branch `main` and manage its checkout under the runtime workspace:
+
+```text
+C:\Users\lalit\orbital\
+├── docker-compose.yml
+├── docker-compose.override.yml
+├── rabbitmq\
+├── workspace\workspace.conf
+└── workspace\orbital\workspace\projects\orbital-poc\
+    └── ...Orbital-managed Git checkout...
+```
+
+The target override must build the bridge from:
+
+```text
+./workspace/orbital/workspace/projects/orbital-poc/rabbit-bridge
+```
+
+Do not replace the target Git workspace configuration with the development bind-mount `workspace.conf`, and do not depend on a sibling `C:\Users\lalit\orbital-poc` clone for that deployment. Push repository changes to the configured branch and let Orbital update its managed checkout.
+
+Compose project names isolate container names and named volumes, but they do not isolate writable host bind mounts. Do not start a second `orbital-poc` project from `C:\Users\lalit\orbital` using the same `./config` and `./workspace` directories. To run a genuinely separate stack, use a separate runtime support directory, as the `C:\dev\bbnr\orbital` development stack does, or parameterize separate bind roots.
+
+### Companion runtime files
+
+| File in `../orbital` | Purpose |
+|---|---|
+| `docker-compose.yml` | Generated Orbital base stack containing Orbital, Postgres, Nebula, and optional Prometheus. Keep this generated base separate from POC customizations. |
+| `docker-compose.override.yml` | Adds RabbitMQ and defines the main bridge plus both FWT workers. Its project mount/build paths are mode-specific: sibling paths in development and the managed Git-checkout path in the existing installation. |
+| `docker-compose.poc.yml` | Optional host-port overrides for a stack launched from its own runtime support directory. It does not isolate shared writable bind mounts when reused from the same directory. |
+| `rabbitmq/rabbitmq.conf` | Imports definitions from `/etc/rabbitmq/definitions.json` and skips an unchanged definition set. |
+| `rabbitmq/definitions.json` | Declares the fixed local user/vhost/permissions, two exchanges, four main queues, four DLQs, and eight bindings. |
+| `workspace/workspace.conf` | In development, loads `/opt/service/projects/orbital-poc` from the read-only bind mount. In the existing installation, retains Git repository polling and the managed checkout under `/opt/service/orbital/workspace`. |
+
+Definitions import owns the local RabbitMQ user hash. Changing only the Compose `RABBITMQ_DEFAULT_USER` or `RABBITMQ_DEFAULT_PASS` values does not replace the imported login.
+
+### Bridge process roles
+
+The same bridge source and Dockerfile are built for three independently configured Compose services. Because the Compose file does not declare a shared `image:` name, the services currently receive separate Compose image tags and may have different image IDs even though they use the same source:
+
+| Compose service | Consumed queue | Expected origin | Adobe ID required | Orbital target | Format sent to Orbital |
+|---|---|---|---|---|---|
+| `rabbit-bridge` | `poc.customer-account.sap-to-adobe` | `sap` | yes | `/api/q/customer-account/from-sap` | raw XML |
+| `rabbit-bridge-adobe-to-fwt` | `poc.customer-account.adobe-to-fwt` | `adobe` | no | `/api/q/customer-account/to-fwt` | structural JSON |
+| `rabbit-bridge-sap-to-fwt` | `poc.customer-account.sap-to-fwt` | `sap` | no | `/api/q/customer-account/to-fwt` | structural JSON |
+
+Only the main bridge receives a host port in isolated mode. The FWT workers expose port 8080 inside Compose so their health endpoints can be inspected with `docker compose exec`.
+
+### Bridge environment variables
+
+#### Rabbit connection and publisher
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RABBITMQ_HOST` | `rabbitmq` | Broker host. |
+| `RABBITMQ_PORT` | `5672` | AMQP port. |
+| `RABBITMQ_USER` | `orbital` | POC broker user. |
+| `RABBITMQ_PASSWORD` | `orbital-poc` | POC broker password; not a production secret. |
+| `RABBITMQ_VHOST` | `poc` | Broker vhost. |
+| `RABBITMQ_HEARTBEAT` | `30` | Pika heartbeat seconds. |
+| `RABBITMQ_BLOCKED_CONNECTION_TIMEOUT` | `30` | Pika blocked-connection timeout seconds. |
+| `RABBITMQ_EXCHANGE` | `poc.customer-account.events` | Publish exchange. |
+| `RABBITMQ_ADOBE_TO_SAP_ROUTING_KEY` | `customer-account.adobe.updated` | Fixed route used by bridge `/publish`. |
+
+#### Generic consumer
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RABBITMQ_CONSUMER_QUEUE` | `poc.customer-account.sap-to-adobe` | The single queue owned by this process. |
+| `RABBITMQ_CONSUMER_ROUTING_PATTERN` | `customer-account.sap.*` | Additional route-key validation; this does not create a broker binding. |
+| `RABBITMQ_CONSUMER_EXPECTED_ORIGIN` | `sap` | Required message origin for this process. |
+| `RABBITMQ_CONSUMER_REQUIRE_ADOBE_CUSTOMER_ID` | `true` | Whether `x-adobe-customer-id` is mandatory. |
+| `RABBITMQ_CONSUMER_PREFETCH` | `1` | Maximum unacknowledged deliveries per worker. |
+| `RABBITMQ_CONSUMER_ENABLED` | `true` | Starts or disables the background consumer. |
+| `RABBITMQ_CONSUMER_RECONNECT_DELAY` | `5` | Delay in seconds between consumer reconnect attempts. |
+
+Legacy fallback names remain supported: `RABBITMQ_SAP_TO_ADOBE_QUEUE`, `RABBITMQ_SAP_TO_ADOBE_ROUTING_PATTERN`, and `ORBITAL_SAP_TO_ADOBE_PATH`. The generic names take precedence when both are present.
+
+#### Contract, Orbital, and HTTP server
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CUSTOMER_ACCOUNT_SCHEMA` | `sap.zbupa-cbo.v1` | Required AMQP schema header. |
+| `CUSTOMER_ACCOUNT_EVENT_TYPE` | `customer-account.updated.v1` | Required AMQP `type`. |
+| `ORBITAL_BASE_URL` | `http://orbital:9022` | Orbital callback base URL. |
+| `ORBITAL_CONSUMER_PATH` | `/api/q/customer-account/from-sap` | Saved query called by the consumer. |
+| `ORBITAL_CONSUMER_PAYLOAD_FORMAT` | `xml` | `xml` or `json`; FWT workers use `json`. |
+| `ORBITAL_TIMEOUT` | `30` | HTTP timeout seconds. |
+| `HTTP_HOST` | `0.0.0.0` | FastAPI/Uvicorn bind address. |
+| `BRIDGE_PORT` | `8080` | FastAPI/Uvicorn port. |
+
+Boolean variables accept `1/true/yes/on` and `0/false/no/off`. Numeric settings reject values below their configured minimum, and payload format rejects anything other than `xml` or `json`.
+
+### Isolated host-port variables
+
+The development `docker-compose.poc.yml` supports these overrides. Use it from a separate runtime directory; changing ports and project name alone does not isolate shared `./config` or `./workspace` bind mounts:
+
+| Variable | Default host port | Service/container port |
+|---|---|---|
+| `POC_ORBITAL_PORT` | `19022` | Orbital `9022` |
+| `POC_POSTGRES_PORT` | `35432` | Postgres `5432` |
+| `POC_NEBULA_PORT` | `18099` | Nebula `8099` |
+| `POC_PROMETHEUS_PORT` | `19090` | Prometheus `9090` |
+| `POC_RABBITMQ_PORT` | `25672` | RabbitMQ AMQP `5672` |
+| `POC_RABBITMQ_MANAGEMENT_PORT` | `25673` | RabbitMQ management `15672` |
+| `POC_BRIDGE_PORT` | `18080` | Main bridge `8080` |
+
+## Run the POC locally
+
+### Prerequisites
+
+- Docker Desktop or Docker Engine with Docker Compose 2.24.4 or newer. The isolated override uses the `!override` YAML tag introduced in Compose 2.24.4.
+- Enough Docker memory for Orbital, Postgres, RabbitMQ, Nebula, and three bridge processes. The generated Compose file limits the Orbital container to 1 GiB.
+- An Orbital license in `~/.orbital/license` if required by the selected image.
+- A `.env` beside `docker-compose.yml` defining the `UID` and `GID` required by the generated base file. Docker Desktop installations commonly use:
+
+  ```dotenv
+  UID=1000
+  GID=1000
+  ```
+
+- Python is optional for running the stack. Python 3.10 or newer is sufficient for local tests; the container uses Python 3.12.
+
+The generated stack defaults `ORBITAL_VERSION` to `next`; RabbitMQ is pinned to `4.1.8-management`, Postgres to `15`, and Nebula currently uses `next`.
+
+### Validate and start the isolated stack
+
+```powershell
+Set-Location C:\dev\bbnr\orbital
+
+docker compose -p orbital-poc `
+  -f docker-compose.yml `
+  -f docker-compose.override.yml `
+  -f docker-compose.poc.yml `
+  config --quiet
+
+docker compose -p orbital-poc `
+  -f docker-compose.yml `
+  -f docker-compose.override.yml `
+  -f docker-compose.poc.yml `
+  up -d --build --wait `
+  postgres rabbitmq nebula orbital `
+  rabbit-bridge rabbit-bridge-adobe-to-fwt rabbit-bridge-sap-to-fwt
+```
+
+`--wait` is not an application-readiness guarantee for Orbital or the bridge services because those containers do not declare Compose health checks. It proves that health-checked dependencies such as RabbitMQ/Nebula are healthy and the other selected containers are running. Complete the readiness gate below before sending fixture traffic.
+
+### Local endpoints
+
+| Service | Isolated host endpoint |
+|---|---|
+| Orbital | `http://localhost:19022` |
+| Main bridge health | `http://localhost:18080/health` |
+| RabbitMQ AMQP | `localhost:25672` |
+| RabbitMQ management UI/API | `http://localhost:25673` |
+| Nebula | `http://localhost:18099` |
+| Postgres | `localhost:35432` |
+| Prometheus, if started | `http://localhost:19090` |
+
+RabbitMQ demo login: `orbital` / `orbital-poc`, vhost `poc`.
+
+Without `docker-compose.poc.yml`, the standard Rabbit ports are `5672` and `15672`, Orbital is `9022`, and Nebula is `8099`. The main bridge has only Docker-network `expose: 8080` in that mode, so it has no host health URL; inspect it with `docker compose exec`. The generated stack may also conflict with an existing Compose project.
+
+```powershell
+docker compose exec -T rabbit-bridge `
+  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health').read().decode())"
+```
+
+### Check service, package, worker, and queue health
+
+```powershell
+Set-Location C:\dev\bbnr\orbital
+
+$composeArgs = @(
+  '-p', 'orbital-poc',
+  '-f', 'docker-compose.yml',
+  '-f', 'docker-compose.override.yml',
+  '-f', 'docker-compose.poc.yml'
+)
+
+docker compose @composeArgs ps
+
+$deadline = (Get-Date).AddMinutes(3)
+$ready = $false
+$lastReadinessError = $null
+
+do {
+  try {
+    $packages = Invoke-RestMethod http://localhost:19022/api/packages
+    $pocPackage = $packages |
+      Where-Object { $_.identifier.unversionedId -eq 'com.lalit/orbital-poc' }
+    $mainHealth = Invoke-RestMethod http://localhost:18080/health
+
+    $adobeFwtHealth = docker compose @composeArgs `
+      exec -T rabbit-bridge-adobe-to-fwt `
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health').read().decode())" |
+      ConvertFrom-Json
+
+    $sapFwtHealth = docker compose @composeArgs `
+      exec -T rabbit-bridge-sap-to-fwt `
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health').read().decode())" |
+      ConvertFrom-Json
+
+    $ready =
+      $pocPackage.health.status -eq 'Healthy' -and
+      $pocPackage.warningCount -eq 0 -and
+      $pocPackage.errorCount -eq 0 -and
+      $mainHealth.status -eq 'ok' -and
+      $adobeFwtHealth.status -eq 'ok' -and
+      $sapFwtHealth.status -eq 'ok'
+  }
+  catch {
+    $lastReadinessError = $_.Exception.Message
+    $ready = $false
+  }
+
+  if (-not $ready) { Start-Sleep -Seconds 3 }
+}
+until ($ready -or (Get-Date) -ge $deadline)
+
+if (-not $ready) {
+  throw "POC readiness timed out. Last error: $lastReadinessError"
+}
+
+$pocPackage |
+  Select-Object @{n='status';e={$_.health.status}},sourceCount,warningCount,errorCount
+$mainHealth
+$adobeFwtHealth
+$sapFwtHealth
+
+docker compose @composeArgs exec -T rabbitmq `
+  rabbitmqctl list_queues -p poc name messages_ready messages_unacknowledged consumers
+```
+
+Expected consumers:
+
+- `sap-to-adobe`: 1;
+- `adobe-to-fwt`: 1;
+- `sap-to-fwt`: 1;
+- `adobe-to-sap`: 0 by design.
+
+### Follow logs
+
+```powershell
+docker compose -p orbital-poc `
+  -f docker-compose.yml `
+  -f docker-compose.override.yml `
+  -f docker-compose.poc.yml `
+  logs -f orbital rabbitmq rabbit-bridge `
+  rabbit-bridge-adobe-to-fwt rabbit-bridge-sap-to-fwt nebula
+```
+
+### Stop while retaining data
+
+```powershell
+docker compose -p orbital-poc `
+  -f docker-compose.yml `
+  -f docker-compose.override.yml `
+  -f docker-compose.poc.yml `
+  down
+```
+
+Do not use `down -v` as a routine stop command. It destroys the POC RabbitMQ and Postgres volumes.
+
+## Deploy to the existing Git-workspace Orbital instance
+
+The running installation at `C:\Users\lalit\orbital` uses Compose project `orbital`, standard ports, and an Orbital-managed Git checkout. Preserve that deployment model.
+
+| Concern | Existing-instance value |
+|---|---|
+| Runtime root | `C:\Users\lalit\orbital` |
+| Compose project | `orbital` (the directory default; do not add `-p orbital-poc`) |
+| Orbital | `http://localhost:9022` |
+| RabbitMQ management | `http://localhost:15672` |
+| RabbitMQ AMQP | `localhost:5672` |
+| Bridge health | Internal port 8080 through `docker compose exec`; no host bridge port is configured. |
+| Managed checkout | `C:\Users\lalit\orbital\workspace\orbital\workspace\projects\orbital-poc` |
+| Bridge build context | `./workspace/orbital/workspace/projects/orbital-poc/rabbit-bridge` |
+
+Do not launch the isolated `orbital-poc` project from this same directory. It would share the writable `./config` and `./workspace` bind mounts with the existing project.
+
+### 1. Publish the Git repository changes
+
+Commit and push this repository to the branch configured in the target `workspace/workspace.conf` (currently `main` at `https://github.com/c0d3rb4b4/orbital-poc.git`). Orbital polls that Git repository and owns the target checkout. Do not manually replace the managed checkout with a sibling clone.
+
+Pushing this repository updates Taxi, Nebula, and Python source only. It cannot create RabbitMQ queues or Compose services because those files are outside this Git repository.
+
+### 2. Merge the external runtime changes
+
+In `C:\Users\lalit\orbital`, preserve:
+
+- the generated `docker-compose.yml`;
+- `.env` and the license mount;
+- `workspace/workspace.conf` with its `git { ... }` repository block;
+- `orbital.volumes: ./workspace:/opt/service/orbital/workspace`;
+- existing runtime `config`, workspace, Postgres, and RabbitMQ data.
+
+Merge these FWT changes into the target support files:
+
+1. Update `rabbitmq/definitions.json` from four queues/four bindings to the topology documented above: four main queues, four DLQs, and eight bindings.
+2. Keep `rabbitmq/rabbitmq.conf` importing `/etc/rabbitmq/definitions.json`.
+3. Update the main `rabbit-bridge` environment to the generic consumer names shown in the bridge-role table.
+4. Add services `rabbit-bridge-adobe-to-fwt` and `rabbit-bridge-sap-to-fwt` using the managed-checkout build context:
+
+   ```yaml
+   build:
+     context: ./workspace/orbital/workspace/projects/orbital-poc/rabbit-bridge
+   ```
+
+5. Give those services the queue, origin, identity, target path, and JSON payload-format settings shown in the bridge-role and environment tables.
+6. Do not copy the development override wholesale: its `../orbital-poc` mount/build paths and disk-workspace configuration are wrong for the Git-backed target.
+
+If `docker compose config --services` still lists only `rabbit-bridge`, or RabbitMQ still reports four queues/four bindings, the target is still on the pre-FWT runtime configuration. A Git push alone does not fix that state.
+
+### 3. Validate, rebuild, and recreate the affected services
+
+After the target override and definitions have been merged, run exactly:
+
+```powershell
+Set-Location C:\Users\lalit\orbital
+
+docker compose config --quiet
+docker compose config --services
+
+docker compose up -d --force-recreate rabbitmq
+
+docker compose up -d --build --force-recreate `
+  rabbit-bridge `
+  rabbit-bridge-adobe-to-fwt `
+  rabbit-bridge-sap-to-fwt
+
+docker compose restart orbital
+```
+
+Recreating RabbitMQ causes it to re-read the definitions while retaining its named data volume. Definition import merges declared objects but does not necessarily delete obsolete objects. Inspect the resulting topology. Remove a volume only after explicitly confirming that all queued data and broker state can be destroyed.
+
+Rebuilding all three bridge services is required after Python changes because each service is independently built from the same source/Dockerfile.
+
+### 4. Verify the deployed instance
+
+```powershell
+Set-Location C:\Users\lalit\orbital
+
+$deadline = (Get-Date).AddMinutes(3)
+$ready = $false
+$lastReadinessError = $null
+
+do {
+  try {
+    $packages = Invoke-RestMethod http://localhost:9022/api/packages
+    $pocPackage = $packages |
+      Where-Object { $_.identifier.unversionedId -eq 'com.lalit/orbital-poc' }
+
+    $mainHealth = docker compose exec -T rabbit-bridge `
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health').read().decode())" |
+      ConvertFrom-Json
+
+    $adobeFwtHealth = docker compose exec -T rabbit-bridge-adobe-to-fwt `
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health').read().decode())" |
+      ConvertFrom-Json
+
+    $sapFwtHealth = docker compose exec -T rabbit-bridge-sap-to-fwt `
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health').read().decode())" |
+      ConvertFrom-Json
+
+    $ready =
+      $pocPackage.health.status -eq 'Healthy' -and
+      $pocPackage.sourceCount -eq 11 -and
+      $pocPackage.warningCount -eq 0 -and
+      $pocPackage.errorCount -eq 0 -and
+      $mainHealth.status -eq 'ok' -and
+      $adobeFwtHealth.status -eq 'ok' -and
+      $sapFwtHealth.status -eq 'ok'
+  }
+  catch {
+    $lastReadinessError = $_.Exception.Message
+    $ready = $false
+  }
+
+  if (-not $ready) { Start-Sleep -Seconds 3 }
+}
+until ($ready -or (Get-Date) -ge $deadline)
+
+if (-not $ready) {
+  throw "Existing-instance readiness timed out. Last error: $lastReadinessError"
+}
+
+$pocPackage |
+  Select-Object @{n='status';e={$_.health.status}},sourceCount,warningCount,errorCount
+$mainHealth
+$adobeFwtHealth
+$sapFwtHealth
+
+docker compose exec -T rabbitmq `
+  rabbitmqctl list_queues -p poc name messages_ready messages_unacknowledged consumers
+
+docker compose exec -T rabbitmq `
+  rabbitmqctl list_bindings -p poc source_name destination_name routing_key
+```
+
+The final topology must contain eight queues and eight explicit bindings. The three active route queues must each show one consumer; `adobe-to-sap` remains consumerless by design.
+
+## Smoke tests
+
+Complete the appropriate readiness gate before running a smoke test. Then select one deployment profile in the current PowerShell session.
+
+For the isolated development stack:
+
+```powershell
+$RuntimeRoot = 'C:\dev\bbnr\orbital'
+$PocRepoRoot = 'C:\dev\bbnr\orbital-poc'
+$OrbitalBaseUrl = 'http://localhost:19022'
+$RabbitManagementUrl = 'http://localhost:25673'
+$ComposeArgs = @(
+  '-p', 'orbital-poc',
+  '-f', 'docker-compose.yml',
+  '-f', 'docker-compose.override.yml',
+  '-f', 'docker-compose.poc.yml'
+)
+Set-Location $RuntimeRoot
+```
+
+For the existing Git-workspace deployment:
+
+```powershell
+$RuntimeRoot = 'C:\Users\lalit\orbital'
+$PocRepoRoot = 'C:\Users\lalit\orbital\workspace\orbital\workspace\projects\orbital-poc'
+$OrbitalBaseUrl = 'http://localhost:9022'
+$RabbitManagementUrl = 'http://localhost:15672'
+$ComposeArgs = @()
+Set-Location $RuntimeRoot
+```
+
+### Adobe-origin update
+
+```powershell
+$started = (Get-Date).ToUniversalTime().ToString('o')
+$headers = @{
+  'X-Message-Id' = [guid]::NewGuid().ToString()
+  'X-Correlation-Id' = [guid]::NewGuid().ToString()
+  'X-System-Origin' = 'adobe'
+  'X-Account-Action' = 'UPDATE'
+}
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$OrbitalBaseUrl/api/q/customer-account/from-adobe" `
+  -ContentType 'application/json' `
+  -Headers $headers `
+  -InFile (Join-Path $PocRepoRoot 'test-data\adobe-update.json')
+
+$deadline = (Get-Date).AddMinutes(2)
+$fwtCaptured = $false
+
+do {
+  $smokeLogs = docker compose @ComposeArgs logs `
+    --since $started nebula rabbit-bridge rabbit-bridge-adobe-to-fwt 2>&1 |
+    Out-String
+  $fwtCaptured = $smokeLogs -match 'FWT_STUB_CAPTURE'
+  if (-not $fwtCaptured) { Start-Sleep -Seconds 2 }
+}
+until ($fwtCaptured -or (Get-Date) -ge $deadline)
+
+if (-not $fwtCaptured) {
+  throw 'Timed out waiting for the Adobe-origin FWT capture.'
+}
+
+$smokeLogs | Select-String 'FWT_STUB_CAPTURE'
+
+docker compose @ComposeArgs exec -T rabbitmq `
+  rabbitmqctl list_queues -p poc name messages_ready messages_unacknowledged consumers
+```
+
+Expected result:
+
+1. Orbital projects the Adobe fixture into the SAP IDoc parameter model.
+2. The bridge publishes one persistent XML event with route `customer-account.adobe.updated`.
+3. One copy remains ready in `poc.customer-account.adobe-to-sap`, because that queue is the simulated SAP inbox.
+4. The Adobe-to-FWT worker consumes and acknowledges its copy.
+5. Nebula logs `FWT_STUB_CAPTURE`; its body matches `test-data/expected-fwt-update.json`.
+
+The initial query response proves publisher confirmation and routing, not completion of the asynchronous FWT branch. The polling loop waits for a new Nebula capture from this test window. Exact JSON comparison to `expected-fwt-update.json` remains a manual assertion. Inspect the SAP-inbox message in the Rabbit UI with requeue enabled if it must remain available.
+
+### SAP-origin update through the Rabbit management API
+
+The management HTTP API is a convenient fixture injector. It is not the application integration path; continuous transport uses AMQP through Pika.
+
+```powershell
+$auth = [Convert]::ToBase64String(
+  [Text.Encoding]::ASCII.GetBytes('orbital:orbital-poc')
+)
+$rabbitHeaders = @{ Authorization = "Basic $auth" }
+
+$meta = Get-Content (Join-Path $PocRepoRoot 'test-data\rabbit-message-metadata.json') -Raw |
+  ConvertFrom-Json
+$meta.message_id = [guid]::NewGuid().ToString()
+$meta.correlation_id = [guid]::NewGuid().ToString()
+$meta.headers.'x-causation-id' = [guid]::NewGuid().ToString()
+
+$started = (Get-Date).ToUniversalTime().ToString('o')
+
+$request = @{
+  properties = @{
+    content_type = $meta.content_type
+    delivery_mode = 2
+    message_id = $meta.message_id
+    correlation_id = $meta.correlation_id
+    type = $meta.type
+    headers = $meta.headers
+  }
+  routing_key = $meta.routing_key
+  payload = Get-Content (Join-Path $PocRepoRoot 'test-data\sap-update.xml') -Raw
+  payload_encoding = 'string'
+} | ConvertTo-Json -Depth 10
+
+$publishResult = Invoke-RestMethod `
+  -Method Post `
+  -Uri "$RabbitManagementUrl/api/exchanges/poc/poc.customer-account.events/publish" `
+  -Headers $rabbitHeaders `
+  -ContentType 'application/json' `
+  -Body $request
+
+if (-not $publishResult.routed) {
+  throw 'RabbitMQ accepted the management request but routed no queue copy.'
+}
+
+$deadline = (Get-Date).AddMinutes(2)
+$adobeCaptured = $false
+$fwtCaptured = $false
+
+do {
+  $smokeLogs = docker compose @ComposeArgs logs `
+    --since $started nebula rabbit-bridge rabbit-bridge-sap-to-fwt 2>&1 |
+    Out-String
+  $adobeCaptured = $smokeLogs -match 'ADOBE_STUB_CAPTURE'
+  $fwtCaptured = $smokeLogs -match 'FWT_STUB_CAPTURE'
+  if (-not ($adobeCaptured -and $fwtCaptured)) { Start-Sleep -Seconds 2 }
+}
+until (($adobeCaptured -and $fwtCaptured) -or (Get-Date) -ge $deadline)
+
+if (-not ($adobeCaptured -and $fwtCaptured)) {
+  throw 'Timed out waiting for both SAP-origin target captures.'
+}
+
+$smokeLogs | Select-String 'ADOBE_STUB_CAPTURE|FWT_STUB_CAPTURE'
+
+docker compose @ComposeArgs exec -T rabbitmq `
+  rabbitmqctl list_queues -p poc name messages_ready messages_unacknowledged consumers
+```
+
+`routed=true` proves that at least one binding accepted the publish. The polling loop is what waits for both asynchronous target captures.
+
+Expected processing:
+
+1. RabbitMQ creates one copy in `sap-to-adobe` and one in `sap-to-fwt`.
+2. The SAP-to-Adobe worker preserves the XML and calls `/from-sap` with the explicit Adobe ID.
+3. Nebula logs one `ADOBE_STUB_CAPTURE` body matching `expected-adobe-update.json`.
+4. The SAP-to-FWT worker converts XML structurally to JSON and calls `/to-fwt`.
+5. Nebula logs one `FWT_STUB_CAPTURE` body matching `expected-fwt-update.json`.
+6. Both workers acknowledge their successful copies and both active main queues return to zero.
+7. Compare the captured bodies manually to `expected-adobe-update.json` and `expected-fwt-update.json`.
+
+### Inspect queue and binding state
+
+```powershell
+docker compose @ComposeArgs exec -T rabbitmq `
+  rabbitmqctl list_queues -p poc name messages_ready messages_unacknowledged consumers
+
+docker compose @ComposeArgs exec -T rabbitmq `
+  rabbitmqctl list_bindings -p poc source_name destination_name routing_key
+```
+
+## Automated tests
+
+### Set up and run bridge tests
+
+```powershell
+Set-Location C:\dev\bbnr\orbital-poc\rabbit-bridge
+
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python -m pytest -q
+.\.venv\Scripts\python -m compileall -q app tests
+.\.venv\Scripts\python -m ruff check app tests
+```
+
+The current suite has 41 passing test cases after parameter expansion.
+
+### What the tests cover
+
+- environment parsing and worker-role configuration;
+- backward-compatible environment aliases;
+- positive HTTP and AMQP UUID-lineage mapping;
+- negative route/origin/action, configured-origin, and Adobe-ID policy cases;
+- strict IDoc JSON/XML envelope conversion;
+- preservation of XML values, attributes, repeated elements, and leading zeroes;
+- publisher confirms, mandatory routing, and persistent message properties;
+- consumer acknowledge/reject decisions;
+- raw-XML versus structural-JSON forwarding;
+- FastAPI XML/JSON publishing, payload/metadata validation, unroutable, health, and lifecycle behavior.
+
+The implementation also rejects invalid UUIDs, wrong schema/event type, and non-persistent AMQP messages. Dedicated negative tests for those validation branches remain continuation work.
+
+### Validate runtime configuration and Taxi compilation
+
+```powershell
+Set-Location C:\dev\bbnr\orbital
+
+docker compose -f docker-compose.yml -f docker-compose.override.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.poc.yml config --quiet
+
+Get-Content rabbitmq\definitions.json -Raw | ConvertFrom-Json | Out-Null
+
+$packages = Invoke-RestMethod http://localhost:19022/api/packages
+$packages |
+  Where-Object { $_.identifier.unversionedId -eq 'com.lalit/orbital-poc' } |
+  Select-Object @{n='status';e={$_.health.status}},sourceCount,warningCount,errorCount
+```
+
+No standalone Taxi CLI is assumed. Orbital's package health is the authoritative live compiler result for this workspace.
+
+## Troubleshooting
+
+### A queue is empty
+
+An empty active route queue normally means its worker consumed and acknowledged the message quickly. Check, in order:
+
+1. `messages_unacknowledged` and `consumers` in RabbitMQ;
+2. the route worker's `/health` and logs;
+3. Nebula logs for `ADOBE_STUB_CAPTURE` or `FWT_STUB_CAPTURE`;
+4. the corresponding route DLQ.
+
+`adobe-to-sap` is the exception. It intentionally has no consumer and should retain an Adobe-origin smoke-test copy until it is inspected or removed.
+
+### Bridge health is degraded or returns 503
+
+Inspect `consumer.last_error`. Common causes are:
+
+- RabbitMQ is not yet healthy;
+- credentials or vhost do not match the imported definitions;
+- the configured queue does not exist;
+- the passive queue declaration detected a topology/configuration typo;
+- the Rabbit connection was interrupted.
+
+The consumer waits `RABBITMQ_CONSUMER_RECONNECT_DELAY` seconds and retries.
+
+### A message is in a route DLQ
+
+Check all of the following:
+
+- body is valid `ZBUPA_CBO` XML;
+- `content_type=application/xml`;
+- `delivery_mode=2`;
+- message ID and correlation ID are UUIDs;
+- optional causation ID is a UUID;
+- `type=customer-account.updated.v1`;
+- `x-schema=sap.zbupa-cbo.v1`;
+- routing-key origin, `x-origin`, action suffix, and `x-action` agree;
+- the worker's configured origin and binding match;
+- SAP-to-Adobe messages include `x-adobe-customer-id`;
+- only `UPDATE` is used.
+
+Then inspect worker and Orbital logs for conversion or downstream HTTP failures. A failed fan-out copy does not undo another route's success.
+
+### RabbitMQ queues are missing after editing definitions
+
+Restart or recreate the Rabbit container and inspect its import logs. The existing data volume can retain obsolete broker objects because definition import is not a pruning migration system. Do not remove the volume merely to make definitions reimport unless all persisted messages and broker state can be discarded.
+
+### Taxi changes are not visible
+
+For the development bind-mount mode, verify:
+
+- `../orbital-poc` is mounted at `/opt/service/projects/orbital-poc`;
+- `workspace/workspace.conf` references that container path;
+- the package appears in `/api/packages`;
+- package warning/error counts are zero;
+- at least the configured three-second polling interval has elapsed.
+
+For the existing Git-workspace mode, verify the configured repository/branch, inspect Orbital logs for Git polling errors, and confirm the managed checkout under `workspace\orbital\workspace\projects\orbital-poc` contains the expected commit. Do not replace its `git { ... }` workspace configuration with the development disk-workspace file.
+
+### There is no Adobe or FWT stub capture
+
+Check route worker logs and DLQ first, then Orbital package health and Orbital logs. Nebula captures only requests that reach the final HTTP operation. It does not observe messages that fail in Rabbit metadata validation or Taxi projection.
+
+### The first Adobe call after a long idle period returns 503
+
+There is a known stale cached publisher-connection issue. The current publisher closes the failed AMQP connection, but the first request can still return `503`; a later request establishes a new connection. Before retrying, inspect whether the original message was routed. The POC has no durable idempotency store, so blind retries can duplicate an effect.
+
+### RabbitMQ login fails
+
+Use:
+
+- username `orbital`;
+- password `orbital-poc`;
+- vhost `poc`;
+- isolated management URL `http://localhost:25673`;
+- standard management URL `http://localhost:15672` when the isolated override is not used.
+
+The credentials come from the imported definitions, not only Compose environment variables.
+
+## Known limitations and continuation work
+
+### Business and contract gaps
+
+- Only updates are supported. Adobe create and SAP `MSGFN=009` are not implemented.
+- The intended individual-account policy is represented by `KTOKD=1`, but SAP-to-Adobe still needs an explicit handled-skip outcome for `KTOKD != 1`.
+- SAP-to-Adobe uses `X-Adobe-Customer-Id` as a POC cross-reference instead of an authoritative identity service.
+- Full FWT parity is not implemented. The first slice excludes timestamps, activity, reference descriptions, money/currency, balances, credit, bank accounts, partner/account-manager data, most flags, standing instructions, and additional-property bags.
+- Missing/invalid date policy needs explicit validation before production use.
+- All enum and optional-field permutations are not yet covered by checked-in end-to-end tests.
+
+### Delivery and operational gaps
+
+- No retry queues, exponential backoff, replay command, poison-message workflow, or ordering policy exists.
+- Terminal consumer failures are dead-lettered immediately.
+- There is no durable idempotency store or exactly-once guarantee.
+- Adobe and a later SAP confirmation can both write to FWT; business-key/version deduplication is undecided.
+- The publisher can fail the first request after RabbitMQ has closed a long-idle cached connection.
+- RabbitMQ credentials are fixed local demo values; there is no TLS, secret store, least-privilege production user, clustering, or HA.
+- Nebula is ephemeral and captures through logs only.
+- The manual SAP producer is not a real SAP connector.
+- End-to-end fixture assertions are currently manual; they should be automated and checked in.
+- Ranged Python dependencies and `next` Orbital/Nebula image tags reduce build reproducibility.
+
+### Route boundaries
+
+- No FWT-origin customer-account route exists.
+- No Hybris route is included.
+- The fake SAP inbox does not automatically emit a response.
+- `x-integration-write` is propagated, but a generic real-source suppression policy is not implemented.
+
+## How to extend the POC safely
+
+### Add a field to an existing route
+
+1. Identify whether it is a reusable business fact or a system-owned protocol field.
+2. Add a narrow semantic type to the taxonomy only when the meaning is genuinely reusable.
+3. Add the source field to the source-owned contract and the target field to the target-owned parameter model.
+4. Use enum synonyms or Taxi expressions for business conversion; do not add the mapping to Python.
+5. Update source and expected target fixtures.
+6. Test missing, optional, invalid, and leading-zero/string cases.
+7. Confirm Orbital package health remains 0 warnings and 0 errors.
+8. Run the bridge suite if the wire structure or metadata changes.
+
+### Add another FWT parity slice
+
+Add only fields with an authoritative source and deterministic policy. Do not generate timestamps, currency, balances, or reference descriptions merely to fill the target shape. Extend `FwtCustomerAccount` and `expected-fwt-update.json`, then live-assert both Adobe-origin and SAP-origin routes because they share the query but have independent queues.
+
+### Add a new target system
+
+1. Create a target-owned Taxi contract and service operation.
+2. Reuse semantic facts instead of reusing another system's physical model.
+3. Add a saved query for the target projection.
+4. Add a dedicated main queue and route-specific DLQ in Rabbit definitions.
+5. Add a separately configured bridge worker process for independent acknowledgement/failure state.
+6. Add a Nebula stub only for local development.
+7. Add positive bindings for approved origins; never use a broad catch-all binding by default.
+8. Decide duplication and loop policy before enabling multiple origins.
+
+### Replace a stub with a real HTTP target
+
+Keep the Taxi service contract and change the environment-specific service URL/configuration. Add production authentication and secret management outside the model. Remove Nebula from that deployment, but retain a test profile or isolated environment for deterministic contract testing.
+
+### Replace the Python bridge with a native connector
+
+Preserve these observable behaviors:
+
+- publisher confirmation and unroutable detection;
+- persistent XML message body and metadata contract;
+- one independent delivery per route queue;
+- manual acknowledgement after full downstream success;
+- route validation and route-specific dead-lettering;
+- lineage-header preservation;
+- explicit XML handling with no business mapping in the transport layer.
+
+## BIP traceability
+
+This POC was selected and modelled from the local `../bip` implementation. These files are the main points of comparison:
+
+| Concern | BIP source |
+|---|---|
+| Adobe on-ramp and publish metadata | `../bip/la-bip-adobe-customeraccount/LogicApp.json` |
+| Adobe contract | `../bip/bbr.bip.Schema/AccountCreation.cs` |
+| Adobe-to-SAP mapping | `../bip/bbr.bip.Mapping/MapCreateAccountToIdoc.cs` |
+| Topic subscriptions and origin filters | `../bip/bbr.bip.deploy/AddMessageTypes.ps1` |
+| SAP off-ramp | `../bip/la-bip-customeraccount-sap/LogicApp.json` |
+| SAP gateway and on-ramp | `../bip/la-bip-sap-gateway-customeraccount/LogicApp.json`, `../bip/la-bip-sap-customeraccount/LogicApp.json` |
+| SAP XML schema | `../bip/bbr.bip.Schema/ZBUPA_CBO.XSD` |
+| SAP-to-Adobe mapping/filter | `../bip/bbr.bip.productservices/ZBUPA_CBOService.cs` |
+| Adobe target client | `../bip/bbr.bip.productservices/AdobeDataService.cs` |
+| FWT off-ramp | `../bip/la-bip-customeraccount-fwt/LogicApp.json` |
+| FWT contract | `../bip/bbr.bip.Schema/AccountCreationFWT.cs` |
+| SAP-to-FWT mapping | `../bip/bbr.bip.productservices/ZBUPA_CBOServiceFwt.cs` |
+| FWT target client | `../bip/bbr.bip.productservices/FineWineDataServices.cs` |
+
+The production FWT subscription accepts more origins than this POC. This implementation covers the relevant Adobe- and SAP-origin paths and deliberately does not add Hybris or invent an FWT-origin customer-account flow.
+
+## Technical references
+
+- [Taxi models](https://taxilang.org/docs/language/models)
+- [Orbital HTTP data sources](https://orbitalhq.com/docs/describing-data-sources/http)
+- [Orbital write mutations](https://orbitalhq.com/docs/querying/mutations)
+- [Orbital saved queries as endpoints](https://orbitalhq.com/docs/querying/queries-as-endpoints)
+- [Orbital XML formats](https://orbitalhq.com/docs/data-formats/xml)
+- [Orbital service URL configuration](https://orbitalhq.com/docs/describing-data-sources/configuring-connections)
+- [Nebula service stubbing](https://orbitalhq.com/docs/testing/stubbing-services)
+- [RabbitMQ exchanges and topic routing](https://www.rabbitmq.com/docs/exchanges)
+- [RabbitMQ acknowledgements and confirms](https://www.rabbitmq.com/docs/confirms)
 - [RabbitMQ dead-letter exchanges](https://www.rabbitmq.com/docs/dlx)
 - [RabbitMQ definition import](https://www.rabbitmq.com/docs/definitions)
-- [RabbitMQ HTTP API limitations](https://www.rabbitmq.com/docs/next/http-api-reference)
-- [Official RabbitMQ management image](https://hub.docker.com/_/rabbitmq)
-- [Orbital connector source tree](https://github.com/orbitalapi/orbital/tree/develop/connectors)
-- [Orbital plugin API warning](https://github.com/orbitalapi/orbital/blob/develop/plugin-api/README.md)
