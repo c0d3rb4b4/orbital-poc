@@ -1119,7 +1119,12 @@ RabbitMQ demo login: `orbital` / `orbital-poc`, vhost `poc`.
 Without `docker-compose.poc.yml`, the standard Rabbit ports are `5672` and `15672`, Orbital is `9022`, and Nebula is `8099`. The main bridge has only Docker-network `expose: 8080` in that mode, so it has no host health URL; inspect it with `docker compose exec`. The generated stack may also conflict with an existing Compose project.
 
 ```powershell
-docker compose exec -T rabbit-bridge `
+$standardComposeArgs = @(
+  '-p', 'orbital-poc',
+  '-f', 'docker-compose.yml',
+  '-f', 'docker-compose.override.yml'
+)
+docker compose @standardComposeArgs exec -T rabbit-bridge `
   python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health').read().decode())"
 ```
 
@@ -1283,8 +1288,62 @@ Merge these FWT changes into the target support files:
 4. Add services `rabbit-bridge-adobe-to-fwt` and `rabbit-bridge-sap-to-fwt` using the managed-checkout build context:
 
    ```yaml
-   build:
-     context: ./workspace/orbital/workspace/projects/orbital-poc/rabbit-bridge
+   services:
+     rabbit-bridge-adobe-to-fwt:
+       build:
+         context: ./workspace/orbital/workspace/projects/orbital-poc/rabbit-bridge
+       networks:
+         - nebula_network
+       expose:
+         - "8080"
+       environment:
+         BRIDGE_PORT: 8080
+         RABBITMQ_HOST: rabbitmq
+         RABBITMQ_PORT: 5672
+         RABBITMQ_USER: orbital
+         RABBITMQ_PASSWORD: orbital-poc
+         RABBITMQ_VHOST: poc
+         RABBITMQ_EXCHANGE: poc.customer-account.events
+         RABBITMQ_CONSUMER_QUEUE: poc.customer-account.adobe-to-fwt
+         RABBITMQ_CONSUMER_ROUTING_PATTERN: customer-account.adobe.*
+         RABBITMQ_CONSUMER_EXPECTED_ORIGIN: adobe
+         RABBITMQ_CONSUMER_REQUIRE_ADOBE_CUSTOMER_ID: "false"
+         ORBITAL_BASE_URL: http://orbital:9022
+         ORBITAL_CONSUMER_PATH: /api/q/customer-account/to-fwt
+         ORBITAL_CONSUMER_PAYLOAD_FORMAT: json
+       depends_on:
+         rabbitmq:
+           condition: service_healthy
+         orbital:
+           condition: service_started
+
+     rabbit-bridge-sap-to-fwt:
+       build:
+         context: ./workspace/orbital/workspace/projects/orbital-poc/rabbit-bridge
+       networks:
+         - nebula_network
+       expose:
+         - "8080"
+       environment:
+         BRIDGE_PORT: 8080
+         RABBITMQ_HOST: rabbitmq
+         RABBITMQ_PORT: 5672
+         RABBITMQ_USER: orbital
+         RABBITMQ_PASSWORD: orbital-poc
+         RABBITMQ_VHOST: poc
+         RABBITMQ_EXCHANGE: poc.customer-account.events
+         RABBITMQ_CONSUMER_QUEUE: poc.customer-account.sap-to-fwt
+         RABBITMQ_CONSUMER_ROUTING_PATTERN: customer-account.sap.*
+         RABBITMQ_CONSUMER_EXPECTED_ORIGIN: sap
+         RABBITMQ_CONSUMER_REQUIRE_ADOBE_CUSTOMER_ID: "false"
+         ORBITAL_BASE_URL: http://orbital:9022
+         ORBITAL_CONSUMER_PATH: /api/q/customer-account/to-fwt
+         ORBITAL_CONSUMER_PAYLOAD_FORMAT: json
+       depends_on:
+         rabbitmq:
+           condition: service_healthy
+         orbital:
+           condition: service_started
    ```
 
 5. Give those services the queue, origin, identity, target path, and JSON payload-format settings shown in the bridge-role and environment tables.
@@ -1421,7 +1480,7 @@ docker compose exec -T rabbitmq `
   rabbitmqctl list_bindings -p poc source_name destination_name routing_key
 ```
 
-The final topology must contain eight queues and eight explicit bindings. The three active route queues must each show one consumer; `adobe-to-sap` remains consumerless by design.
+The final topology must contain eight queues and eight explicit bindings. `rabbitmqctl list_bindings` also prints eight implicit default-exchange queue bindings, so the unfiltered command normally returns 16 rows; count the explicit bindings by filtering rows whose `source_name` is non-empty. The three active route queues must each show one consumer; `adobe-to-sap` remains consumerless by design.
 
 ## Smoke tests
 
@@ -1454,9 +1513,28 @@ $ComposeArgs = @()
 Set-Location $RuntimeRoot
 ```
 
+Initialize the Rabbit management helper after selecting either profile:
+
+```powershell
+$rabbitAuth = [Convert]::ToBase64String(
+  [Text.Encoding]::ASCII.GetBytes('orbital:orbital-poc')
+)
+$RabbitApiHeaders = @{ Authorization = "Basic $rabbitAuth" }
+
+function Get-PocQueue([string]$Name) {
+  $encodedName = [uri]::EscapeDataString($Name)
+  Invoke-RestMethod `
+    -Uri "$RabbitManagementUrl/api/queues/poc/$encodedName" `
+    -Headers $RabbitApiHeaders
+}
+```
+
+Nebula does not log message/correlation headers, so capture matching is based on the test window and fixture customer `00010001`. Run smoke tests while other POC traffic is quiescent; these log checks are not safe assertions under concurrent load.
+
 ### Adobe-origin update
 
 ```powershell
+$sapInboxBefore = (Get-PocQueue 'poc.customer-account.adobe-to-sap').messages_ready
 $started = (Get-Date).ToUniversalTime().ToString('o')
 $headers = @{
   'X-Message-Id' = [guid]::NewGuid().ToString()
@@ -1473,19 +1551,26 @@ Invoke-RestMethod `
   -InFile (Join-Path $PocRepoRoot 'test-data\adobe-update.json')
 
 $deadline = (Get-Date).AddMinutes(2)
-$fwtCaptured = $false
+$adobeFlowComplete = $false
 
 do {
   $smokeLogs = docker compose @ComposeArgs logs `
     --since $started nebula rabbit-bridge rabbit-bridge-adobe-to-fwt 2>&1 |
     Out-String
-  $fwtCaptured = $smokeLogs -match 'FWT_STUB_CAPTURE'
-  if (-not $fwtCaptured) { Start-Sleep -Seconds 2 }
+  $fwtCaptured = $smokeLogs -match 'FWT_STUB_CAPTURE.*00010001'
+  $fwtQueue = Get-PocQueue 'poc.customer-account.adobe-to-fwt'
+  $sapInbox = Get-PocQueue 'poc.customer-account.adobe-to-sap'
+  $fwtAcknowledged =
+    $fwtQueue.messages_ready -eq 0 -and
+    $fwtQueue.messages_unacknowledged -eq 0
+  $sapCopyAdded = $sapInbox.messages_ready -ge ($sapInboxBefore + 1)
+  $adobeFlowComplete = $fwtCaptured -and $fwtAcknowledged -and $sapCopyAdded
+  if (-not $adobeFlowComplete) { Start-Sleep -Seconds 2 }
 }
-until ($fwtCaptured -or (Get-Date) -ge $deadline)
+until ($adobeFlowComplete -or (Get-Date) -ge $deadline)
 
-if (-not $fwtCaptured) {
-  throw 'Timed out waiting for the Adobe-origin FWT capture.'
+if (-not $adobeFlowComplete) {
+  throw 'Timed out waiting for the Adobe-origin FWT ACK and SAP-inbox copy.'
 }
 
 $smokeLogs | Select-String 'FWT_STUB_CAPTURE'
@@ -1502,18 +1587,13 @@ Expected result:
 4. The Adobe-to-FWT worker consumes and acknowledges its copy.
 5. Nebula logs `FWT_STUB_CAPTURE`; its body matches `test-data/expected-fwt-update.json`.
 
-The initial query response proves publisher confirmation and routing, not completion of the asynchronous FWT branch. The polling loop waits for a new Nebula capture from this test window. Exact JSON comparison to `expected-fwt-update.json` remains a manual assertion. Inspect the SAP-inbox message in the Rabbit UI with requeue enabled if it must remain available.
+The initial query response proves publisher confirmation and routing, not completion of the asynchronous FWT branch. The polling loop waits for a fixture-matching Nebula capture, zero ready/unacknowledged messages on the FWT queue, and at least one new ready SAP-inbox copy. Exact JSON comparison to `expected-fwt-update.json` remains a manual assertion. Inspect the SAP-inbox message in the Rabbit UI with requeue enabled if it must remain available.
 
 ### SAP-origin update through the Rabbit management API
 
 The management HTTP API is a convenient fixture injector. It is not the application integration path; continuous transport uses AMQP through Pika.
 
 ```powershell
-$auth = [Convert]::ToBase64String(
-  [Text.Encoding]::ASCII.GetBytes('orbital:orbital-poc')
-)
-$rabbitHeaders = @{ Authorization = "Basic $auth" }
-
 $meta = Get-Content (Join-Path $PocRepoRoot 'test-data\rabbit-message-metadata.json') -Raw |
   ConvertFrom-Json
 $meta.message_id = [guid]::NewGuid().ToString()
@@ -1539,7 +1619,7 @@ $request = @{
 $publishResult = Invoke-RestMethod `
   -Method Post `
   -Uri "$RabbitManagementUrl/api/exchanges/poc/poc.customer-account.events/publish" `
-  -Headers $rabbitHeaders `
+  -Headers $RabbitApiHeaders `
   -ContentType 'application/json' `
   -Body $request
 
@@ -1548,21 +1628,28 @@ if (-not $publishResult.routed) {
 }
 
 $deadline = (Get-Date).AddMinutes(2)
-$adobeCaptured = $false
-$fwtCaptured = $false
+$sapFlowComplete = $false
 
 do {
   $smokeLogs = docker compose @ComposeArgs logs `
     --since $started nebula rabbit-bridge rabbit-bridge-sap-to-fwt 2>&1 |
     Out-String
-  $adobeCaptured = $smokeLogs -match 'ADOBE_STUB_CAPTURE'
-  $fwtCaptured = $smokeLogs -match 'FWT_STUB_CAPTURE'
-  if (-not ($adobeCaptured -and $fwtCaptured)) { Start-Sleep -Seconds 2 }
+  $adobeCaptured = $smokeLogs -match 'ADOBE_STUB_CAPTURE id=00010001'
+  $fwtCaptured = $smokeLogs -match 'FWT_STUB_CAPTURE.*00010001'
+  $adobeQueue = Get-PocQueue 'poc.customer-account.sap-to-adobe'
+  $fwtQueue = Get-PocQueue 'poc.customer-account.sap-to-fwt'
+  $bothAcknowledged =
+    $adobeQueue.messages_ready -eq 0 -and
+    $adobeQueue.messages_unacknowledged -eq 0 -and
+    $fwtQueue.messages_ready -eq 0 -and
+    $fwtQueue.messages_unacknowledged -eq 0
+  $sapFlowComplete = $adobeCaptured -and $fwtCaptured -and $bothAcknowledged
+  if (-not $sapFlowComplete) { Start-Sleep -Seconds 2 }
 }
-until (($adobeCaptured -and $fwtCaptured) -or (Get-Date) -ge $deadline)
+until ($sapFlowComplete -or (Get-Date) -ge $deadline)
 
-if (-not ($adobeCaptured -and $fwtCaptured)) {
-  throw 'Timed out waiting for both SAP-origin target captures.'
+if (-not $sapFlowComplete) {
+  throw 'Timed out waiting for both SAP-origin captures and acknowledgements.'
 }
 
 $smokeLogs | Select-String 'ADOBE_STUB_CAPTURE|FWT_STUB_CAPTURE'
@@ -1571,7 +1658,7 @@ docker compose @ComposeArgs exec -T rabbitmq `
   rabbitmqctl list_queues -p poc name messages_ready messages_unacknowledged consumers
 ```
 
-`routed=true` proves that at least one binding accepted the publish. The polling loop is what waits for both asynchronous target captures.
+`routed=true` proves that at least one binding accepted the publish. The polling loop waits for both fixture-matching target captures and for both active route queues to have zero ready and unacknowledged deliveries.
 
 Expected processing:
 
@@ -1592,6 +1679,8 @@ docker compose @ComposeArgs exec -T rabbitmq `
 docker compose @ComposeArgs exec -T rabbitmq `
   rabbitmqctl list_bindings -p poc source_name destination_name routing_key
 ```
+
+`rabbitmqctl list_bindings` also prints one implicit default-exchange binding per queue. Count the eight explicit POC bindings by filtering/counting rows whose `source_name` is non-empty; the unfiltered eight-queue topology normally prints 16 rows.
 
 ## Automated tests
 
