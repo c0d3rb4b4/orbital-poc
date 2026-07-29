@@ -1245,13 +1245,15 @@ Pushing this repository updates Taxi, Nebula, and Python source only. It cannot 
 Record the pushed commit and wait until Orbital's managed checkout reaches it before building a bridge image:
 
 ```powershell
-$ExpectedCommit = (git -C C:\dev\bbnr\orbital-poc rev-parse HEAD).Trim()
+$ExpectedCommit = [string](git -C C:\dev\bbnr\orbital-poc rev-parse HEAD)
+$ExpectedCommit = $ExpectedCommit.Trim()
 $ManagedCheckout = 'C:\Users\lalit\orbital\workspace\orbital\workspace\projects\orbital-poc'
 $deadline = (Get-Date).AddMinutes(3)
 $ActualCommit = $null
 
 do {
-  $ActualCommit = (git -C $ManagedCheckout rev-parse HEAD 2>$null).Trim()
+  $ActualCommit = [string](git -C $ManagedCheckout rev-parse HEAD 2>$null)
+  $ActualCommit = $ActualCommit.Trim()
   if ($ActualCommit -ne $ExpectedCommit) { Start-Sleep -Seconds 5 }
 }
 until ($ActualCommit -eq $ExpectedCommit -or (Get-Date) -ge $deadline)
