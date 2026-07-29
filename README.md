@@ -1242,6 +1242,27 @@ Commit and push this repository to the branch configured in the target `workspac
 
 Pushing this repository updates Taxi, Nebula, and Python source only. It cannot create RabbitMQ queues or Compose services because those files are outside this Git repository.
 
+Record the pushed commit and wait until Orbital's managed checkout reaches it before building a bridge image:
+
+```powershell
+$ExpectedCommit = (git -C C:\dev\bbnr\orbital-poc rev-parse HEAD).Trim()
+$ManagedCheckout = 'C:\Users\lalit\orbital\workspace\orbital\workspace\projects\orbital-poc'
+$deadline = (Get-Date).AddMinutes(3)
+$ActualCommit = $null
+
+do {
+  $ActualCommit = (git -C $ManagedCheckout rev-parse HEAD 2>$null).Trim()
+  if ($ActualCommit -ne $ExpectedCommit) { Start-Sleep -Seconds 5 }
+}
+until ($ActualCommit -eq $ExpectedCommit -or (Get-Date) -ge $deadline)
+
+if ($ActualCommit -ne $ExpectedCommit) {
+  throw "Managed checkout is stale. Expected $ExpectedCommit, found $ActualCommit"
+}
+```
+
+Run this only after confirming that the local `HEAD` was actually pushed to the configured `main` branch. Otherwise the loop correctly times out.
+
 ### 2. Merge the external runtime changes
 
 In `C:\Users\lalit\orbital`, preserve:
@@ -1269,7 +1290,7 @@ Merge these FWT changes into the target support files:
 
 If `docker compose config --services` still lists only `rabbit-bridge`, or RabbitMQ still reports four queues/four bindings, the target is still on the pre-FWT runtime configuration. A Git push alone does not fix that state.
 
-### 3. Validate, rebuild, and recreate the affected services
+### 3. Validate and update infrastructure with consumers stopped
 
 After the target override and definitions have been merged, run exactly:
 
@@ -1279,21 +1300,64 @@ Set-Location C:\Users\lalit\orbital
 docker compose config --quiet
 docker compose config --services
 
+docker compose stop `
+  rabbit-bridge `
+  rabbit-bridge-adobe-to-fwt `
+  rabbit-bridge-sap-to-fwt
+
 docker compose up -d --force-recreate rabbitmq
+docker compose restart orbital
+```
+
+Stopping all consumers first prevents retained Rabbit deliveries from being rejected to a DLQ while RabbitMQ or Orbital is restarting. Do not start the bridge workers until the Taxi package-only gate below succeeds.
+
+Recreating RabbitMQ causes it to re-read the definitions while retaining its named data volume. Definition import merges declared objects but does not necessarily delete obsolete objects. Inspect the resulting topology. Remove a volume only after explicitly confirming that all queued data and broker state can be destroyed.
+
+### 4. Wait for the Taxi package before starting consumers
+
+```powershell
+Set-Location C:\Users\lalit\orbital
+
+$deadline = (Get-Date).AddMinutes(3)
+$packageReady = $false
+$lastReadinessError = $null
+
+do {
+  try {
+    $packages = Invoke-RestMethod http://localhost:9022/api/packages
+    $pocPackage = $packages |
+      Where-Object { $_.identifier.unversionedId -eq 'com.lalit/orbital-poc' }
+    $packageReady =
+      $pocPackage.health.status -eq 'Healthy' -and
+      $pocPackage.sourceCount -eq 11 -and
+      $pocPackage.warningCount -eq 0 -and
+      $pocPackage.errorCount -eq 0
+  }
+  catch {
+    $lastReadinessError = $_.Exception.Message
+    $packageReady = $false
+  }
+
+  if (-not $packageReady) { Start-Sleep -Seconds 3 }
+}
+until ($packageReady -or (Get-Date) -ge $deadline)
+
+if (-not $packageReady) {
+  throw "Taxi package readiness timed out. Last error: $lastReadinessError"
+}
+
+$pocPackage |
+  Select-Object @{n='status';e={$_.health.status}},sourceCount,warningCount,errorCount
 
 docker compose up -d --build --force-recreate `
   rabbit-bridge `
   rabbit-bridge-adobe-to-fwt `
   rabbit-bridge-sap-to-fwt
-
-docker compose restart orbital
 ```
-
-Recreating RabbitMQ causes it to re-read the definitions while retaining its named data volume. Definition import merges declared objects but does not necessarily delete obsolete objects. Inspect the resulting topology. Remove a volume only after explicitly confirming that all queued data and broker state can be destroyed.
 
 Rebuilding all three bridge services is required after Python changes because each service is independently built from the same source/Dockerfile.
 
-### 4. Verify the deployed instance
+### 5. Verify workers and topology
 
 ```powershell
 Set-Location C:\Users\lalit\orbital
