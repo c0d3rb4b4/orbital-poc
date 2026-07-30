@@ -6,7 +6,9 @@ Run with a Python environment containing python-docx:
 
 from __future__ import annotations
 
+import argparse
 import re
+from datetime import datetime
 from pathlib import Path
 
 from docx import Document
@@ -191,6 +193,8 @@ def configure_document(doc: Document) -> None:
     props.author = "Customer Account Integration POC Team"
     props.keywords = "Orbital, Taxi, RabbitMQ, Azure, BIP, Adobe, SAP, FWT, case study"
     props.comments = "Generated from the checked-in Markdown source."
+    props.created = datetime(2026, 7, 29)
+    props.modified = datetime(2026, 7, 30)
 
 
 def configure_header_footer(doc: Document) -> None:
@@ -237,7 +241,7 @@ def add_accent_rule(doc: Document, color=AMBER, width="24") -> None:
     p_pr.append(p_bdr)
 
 
-INLINE_PATTERN = re.compile(r"(`[^`]+`|\*\*[^*]+\*\*)")
+INLINE_PATTERN = re.compile(r"(<br\s*/?>|`[^`]+`|\*\*[^*]+\*\*)", re.IGNORECASE)
 
 
 def add_inline(paragraph, text: str, *, default_bold=False, default_italic=False) -> None:
@@ -247,7 +251,9 @@ def add_inline(paragraph, text: str, *, default_bold=False, default_italic=False
             run = paragraph.add_run(text[position : match.start()])
             set_run_font(run, bold=default_bold, italic=default_italic)
         token = match.group(0)
-        if token.startswith("`"):
+        if token.lower().startswith("<br"):
+            paragraph.add_run().add_break()
+        elif token.startswith("`"):
             run = paragraph.add_run(token[1:-1])
             run.style = "Code Inline"
         else:
@@ -408,17 +414,25 @@ def add_image(doc: Document, alt: str, path_text: str) -> None:
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(4)
     p.paragraph_format.space_after = Pt(2)
+    p.paragraph_format.keep_with_next = True
     run = p.add_run()
     run.add_picture(str(path), width=Inches(6.55))
     set_picture_alt_text(p, alt)
 
 
 def add_body_paragraph(doc: Document, text: str) -> None:
-    style = "Case Caption" if text.startswith("**Figure ") else None
+    is_figure_caption = text.startswith("**Figure ")
+    is_table_caption = text.startswith("**Table ")
+    style = "Case Caption" if is_figure_caption else None
     p = doc.add_paragraph(style=style)
-    if style:
+    if is_figure_caption:
         stripped = text.replace("**", "")
         add_inline(p, stripped, default_italic=True)
+    elif is_table_caption:
+        p.paragraph_format.keep_with_next = True
+        p.paragraph_format.space_before = Pt(4)
+        p.paragraph_format.space_after = Pt(3)
+        add_inline(p, text)
     else:
         add_inline(p, text)
 
@@ -426,6 +440,7 @@ def add_body_paragraph(doc: Document, text: str) -> None:
 def parse_markdown(doc: Document, lines: list[str]) -> None:
     index = 0
     paragraph_buffer: list[str] = []
+    suppress_next_heading_page_break = False
 
     def flush_paragraph() -> None:
         if paragraph_buffer:
@@ -445,6 +460,8 @@ def parse_markdown(doc: Document, lines: list[str]) -> None:
             flush_paragraph()
             if stripped == "<!-- PAGE BREAK -->":
                 doc.add_page_break()
+            elif stripped == "<!-- CONTINUE PAGE -->":
+                suppress_next_heading_page_break = True
             index += 1
             continue
 
@@ -461,7 +478,7 @@ def parse_markdown(doc: Document, lines: list[str]) -> None:
             level = len(heading.group(1))
             p = doc.add_heading(heading.group(2), level=level)
             if level == 1:
-                p.paragraph_format.page_break_before = True
+                p.paragraph_format.page_break_before = not suppress_next_heading_page_break
                 p_pr = p._p.get_or_add_pPr()
                 borders = OxmlElement("w:pBdr")
                 bottom = OxmlElement("w:bottom")
@@ -471,6 +488,7 @@ def parse_markdown(doc: Document, lines: list[str]) -> None:
                 bottom.set(qn("w:color"), AMBER)
                 borders.append(bottom)
                 p_pr.append(borders)
+            suppress_next_heading_page_break = False
             index += 1
             continue
 
@@ -542,7 +560,7 @@ def remove_consecutive_page_breaks(doc: Document) -> None:
                 next_p.paragraph_format.page_break_before = False
 
 
-def build() -> Path:
+def build(output: Path = OUTPUT) -> Path:
     source_text = SOURCE.read_text(encoding="utf-8")
     lines = source_text.splitlines()
     try:
@@ -557,10 +575,19 @@ def build() -> Path:
     doc.add_page_break()
     parse_markdown(doc, lines[body_start:])
     remove_consecutive_page_breaks(doc)
-    doc.save(OUTPUT)
-    return OUTPUT
+    output = output.resolve()
+    doc.save(output)
+    return output
 
 
 if __name__ == "__main__":
-    result = build()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT,
+        help=f"DOCX output path (default: {OUTPUT})",
+    )
+    args = parser.parse_args()
+    result = build(args.output)
     print(result)

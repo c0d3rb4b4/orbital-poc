@@ -28,7 +28,7 @@ Adobe, SAP and FWT customer-account updates using Orbital, Taxi, RabbitMQ and a 
 9. Recommendation and next steps
 10. Production decision gates
 11. Transferable lessons
-12. Appendices
+12. Appendices A–C
 
 ## How to read this case study
 
@@ -131,9 +131,9 @@ The POC would be considered functionally successful if it could demonstrate all 
 
 ## 3.1 End-to-end architecture
 
-![Implemented POC architecture](assets/case-study-architecture.png)
+![Architecture showing Adobe and SAP inputs flowing through reusable Taxi projections, the transport-only bridge and RabbitMQ layer, and independent SAP, Adobe and FWT outcomes](assets/case-study-architecture.png)
 
-**Figure 1 — Implemented POC architecture.** Blue components own semantic projection; amber components own transport and delivery; green components represent sources or simulated targets.
+**Figure 1 — Implemented POC architecture.** Reusable Taxi facts drive both projection stages; the amber bridge/RabbitMQ layer owns transport only, while green nodes are sources or simulated outcomes.
 
 An Adobe request enters Orbital as JSON. Taxi extracts reusable facts from the Adobe-owned contract and constructs a SAP IDoc parameter model. Orbital calls the bridge over HTTP. The bridge validates transport metadata, serializes the already-projected structure as XML and performs a persistent, mandatory RabbitMQ publish with publisher confirmation.
 
@@ -143,12 +143,14 @@ A SAP-origin test begins with a persistent SAP XML message. RabbitMQ creates ind
 
 ## 3.2 Route model
 
+Queue names below omit the common `poc.customer-account.` prefix for readability.
+
 | Origin | RabbitMQ route | Consumer | Final outcome |
 |---|---|---|---|
-| Adobe | `customer-account.adobe.updated` → `poc.customer-account.adobe-to-sap` | None | Durable simulated SAP inbox copy remains available for inspection |
-| Adobe | `customer-account.adobe.updated` → `poc.customer-account.adobe-to-fwt` | Adobe-to-FWT worker | Taxi projects and Nebula captures the FWT POST |
-| SAP | `customer-account.sap.updated` → `poc.customer-account.sap-to-adobe` | Main bridge worker | Taxi projects and Nebula captures the Adobe PUT |
-| SAP | `customer-account.sap.updated` → `poc.customer-account.sap-to-fwt` | SAP-to-FWT worker | Taxi projects and Nebula captures the FWT POST |
+| Adobe | `customer-account.adobe.updated`<br/>→ `adobe-to-sap` | None | Durable simulated SAP inbox copy remains available for inspection |
+| Adobe | `customer-account.adobe.updated`<br/>→ `adobe-to-fwt` | Adobe-to-FWT worker | Taxi projects and Nebula captures the FWT POST |
+| SAP | `customer-account.sap.updated`<br/>→ `sap-to-adobe` | Main bridge worker | Taxi projects and Nebula captures the Adobe PUT |
+| SAP | `customer-account.sap.updated`<br/>→ `sap-to-fwt` | SAP-to-FWT worker | Taxi projects and Nebula captures the FWT POST |
 
 Positive topic bindings route only approved origins. No `customer-account.fwt.*` binding exists. This prevents a transport echo in the POC; it is not a complete production loop-prevention or idempotency policy.
 
@@ -167,6 +169,8 @@ This avoids a common failure mode in integration models: treating every string a
 That identity policy differs from the inspected BIP implementation, which currently uses SAP `KUNNR` in the Adobe write path and converts it through integer parsing in parts of the body mapping. The POC preserves the leading-zero SAP number and requires a separate Adobe ID. This is a deliberate design experiment, not exact reverse-payload parity; the shared synthetic values can conceal the difference unless identity cases are tested explicitly.
 
 Enum synonyms connect system codes to shared meaning. An Adobe status such as `ACTIVE`, a SAP `KATR5` code such as `AC`, and the FWT status `ACTIVE` can represent the same semantic status without forcing a common wire enum. Similar treatment is used for account type, account group, contact preference and action.
+
+**Table 1 — Selected semantic mappings across system-owned contracts.**
 
 | Business fact | Adobe representation | SAP representation | FWT representation | POC rule |
 |---|---|---|---|---|
@@ -193,9 +197,9 @@ Nebula is service virtualization only. It exposes an Adobe customer PUT and an F
 
 ## 3.6 Delivery sequence
 
-![Generic POC delivery sequence](assets/case-study-sequence.png)
+![Sequence showing separate Adobe and SAP ingress paths, confirmed RabbitMQ publication, independent route delivery, acknowledgement after success, and route-specific dead-lettering after failure](assets/case-study-sequence.png)
 
-**Figure 2 — Generic delivery sequence.** The caller’s synchronous success proves confirmed publication, not asynchronous completion of every target branch.
+**Figure 2 — Confirmed publish and route-delivery lifecycle.** RabbitMQ settles every route copy independently; successful ingress confirms publication, not asynchronous completion of every target branch.
 
 The distinction between publication and completion is important. The HTTP `202` response means RabbitMQ accepted a routable persistent message. The FWT or Adobe outcome must be established separately using queue state, worker health, dead-letter state and the corresponding Nebula capture.
 
@@ -330,6 +334,8 @@ No load test, soak test, failover exercise, security assessment, cost model or p
 
 ## 7.1 Summary comparison
 
+**Table 2 — Demonstrated POC advantages and unresolved Azure gaps.**
+
 | Dimension | Advantage demonstrated by Orbital/Taxi POC | Azure advantage or unresolved POC gap |
 |---|---|---|
 | Semantic modelling | Narrow facts, enum synonyms and independent contracts make business meaning explicit and compiler-checkable | Existing C# ecosystem is mature, familiar and covers a broader production field/behaviour set |
@@ -388,7 +394,9 @@ The current Azure codebase represents a broader operational implementation. It h
 
 ## 7.4 Important nuance about Azure reliability
 
-The comparison should use the actual BIP implementation rather than generic platform marketing. For example, inspected Adobe and FWT Function actions explicitly disable action retry. Conversely, the Azure templates show real workflow, Service Bus, archival/correlation and notification patterns that the POC has not recreated. Service Bus entity settlement, max-delivery and live connector policies were not verified from deployed state. A future assessment should compare route-by-route effective behaviour—retry, settlement, dead-letter, replay, monitoring and recovery—not simply list platform features.
+The comparison should use the actual BIP implementation rather than generic platform marketing. For example, inspected Adobe and FWT Function actions explicitly disable action retry. Conversely, the Azure templates show workflow, Service Bus, archival/correlation and notification patterns that the POC has not recreated. Service Bus settlement, max-delivery and live connector policies were not verified from deployed state. A future assessment should compare effective route behaviour—retry, settlement, dead-letter, replay, monitoring and recovery—not simply list platform features.
+
+<!-- CONTINUE PAGE -->
 
 # 8. Architectural implications
 

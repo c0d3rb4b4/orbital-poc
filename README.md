@@ -844,7 +844,7 @@ orbital-poc/
 
 | File | What it does and why it exists |
 |---|---|
-| `.gitignore` | Excludes Python bytecode, virtual environments, and pytest/Ruff caches so bridge-generated artifacts do not pollute the Taxi repository. |
+| `.gitignore` | Excludes Python bytecode, virtual environments, pytest/Ruff caches, and Microsoft Office lock files so generated artifacts do not pollute the Taxi repository. |
 | `README.md` | This architecture, operations, testing, troubleshooting, and continuation guide. It is intended to be sufficient for a new engineer to understand and resume the POC. |
 | `taxi.conf` | Defines package `com.lalit/orbital-poc` version `0.1.0`, uses `src/` as the Taxi source root, and includes project-local service configuration and Nebula scripts as additional Orbital sources. |
 

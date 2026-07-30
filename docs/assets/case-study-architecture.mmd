@@ -1,39 +1,58 @@
-flowchart LR
-    Adobe["Adobe JSON"]
-    SapInput["SAP XML fixture"]
-
-    subgraph Orbital["Orbital + Taxi semantic layer"]
-        A2S["Adobe to SAP projection"]
-        S2A["SAP to Adobe projection"]
-        ToFWT["Shared SAP IDoc to FWT projection"]
-        Facts["Reusable customer facts and enum meanings"]
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Arial",
+    "fontSize": "18px",
+    "lineColor": "#475467",
+    "primaryTextColor": "#17365D",
+    "edgeLabelBackground": "#FFFFFF",
+    "clusterBkg": "#F8FAFC",
+    "clusterBorder": "#CBD5E1"
+  },
+  "flowchart": {
+    "curve": "linear",
+    "nodeSpacing": 48,
+    "rankSpacing": 58,
+    "diagramPadding": 18,
+    "htmlLabels": true
+  }
+}}%%
+flowchart TB
+    subgraph Inputs["Source inputs"]
+        direction LR
+        Adobe["Adobe JSON update"]
+        SapInput["SAP IDoc XML fixture"]
     end
 
-    subgraph Transport["Python bridge + RabbitMQ"]
-        Bridge["HTTP / AMQP bridge"]
-        Exchange{{"Topic exchange"}}
-        ASQ["Adobe to SAP queue\nSimulated SAP inbox"]
-        AFQ["Adobe to FWT queue"]
-        SAQ["SAP to Adobe queue"]
-        SFQ["SAP to FWT queue"]
+    Facts["Reusable Taxi semantics<br/><b>typed facts + enum synonyms</b>"]
+    AdobeProjection["Orbital + Taxi<br/><b>Adobe → SAP projection</b>"]
+    Transport["Python bridge + RabbitMQ<br/><b>transport only</b><br/>confirmed publish • topic fan-out • ACK/DLQ"]
+    TargetProjection["Orbital + Taxi<br/><b>SAP IDoc → Adobe / FWT projections</b>"]
+
+    subgraph Outcomes["Independent route outcomes"]
+        direction LR
+        SapInbox["Simulated SAP inbox<br/>retained queue copy"]
+        AdobeStub["Adobe update<br/>Nebula capture"]
+        FwtStub["FWT update<br/>Nebula capture"]
     end
 
-    Adobe --> A2S --> Bridge --> Exchange
-    SapInput --> Exchange
-    Exchange --> ASQ
-    Exchange --> AFQ --> Bridge --> ToFWT
-    Exchange --> SAQ --> Bridge --> S2A
-    Exchange --> SFQ --> Bridge --> ToFWT
-    S2A --> AdobeStub["Nebula Adobe capture"]
-    ToFWT --> FWTStub["Nebula FWT capture"]
+    Adobe -->|"parse and project"| AdobeProjection
+    AdobeProjection -->|"projected SAP IDoc"| Transport
+    SapInput -->|"persistent SAP XML"| Transport
 
-    Facts -. "typed facts" .-> A2S
-    Facts -. "typed facts" .-> S2A
-    Facts -. "typed facts" .-> ToFWT
+    Transport -->|"Adobe-origin SAP copy"| SapInbox
+    Transport -->|"consumed route copies"| TargetProjection
+    TargetProjection -->|"SAP-origin PUT"| AdobeStub
+    TargetProjection -->|"Adobe / SAP-origin POST"| FwtStub
 
-    classDef semantic fill:#e8f1ff,stroke:#2962a3,color:#17324d;
-    classDef transport fill:#fff2d9,stroke:#b27000,color:#4f3500;
-    classDef endpoint fill:#eaf7ed,stroke:#2d7a45,color:#173d24;
-    class A2S,S2A,ToFWT,Facts semantic;
-    class Bridge,Exchange,ASQ,AFQ,SAQ,SFQ transport;
-    class Adobe,SapInput,AdobeStub,FWTStub endpoint;
+    Facts -. "reused by" .-> AdobeProjection
+    Facts -. "reused by" .-> TargetProjection
+
+    classDef semantic fill:#E8F1FF,stroke:#2962A3,stroke-width:2px,color:#17324D;
+    classDef transport fill:#FFF2D9,stroke:#B27000,stroke-width:2px,color:#4F3500;
+    classDef endpoint fill:#EAF7ED,stroke:#2D7A45,stroke-width:2px,color:#173D24;
+    classDef taxonomy fill:#EEF2FF,stroke:#5B5FC7,stroke-width:2px,color:#25265E;
+    class AdobeProjection,TargetProjection semantic;
+    class Transport transport;
+    class Adobe,SapInput,SapInbox,AdobeStub,FwtStub endpoint;
+    class Facts taxonomy;

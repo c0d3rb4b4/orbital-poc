@@ -1,34 +1,80 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Arial",
+    "fontSize": "26px",
+    "actorBkg": "#EAF2F8",
+    "actorBorder": "#2F5597",
+    "actorTextColor": "#17365D",
+    "actorLineColor": "#7A8AA0",
+    "signalColor": "#344054",
+    "signalTextColor": "#344054",
+    "labelBoxBkgColor": "#EEF2FF",
+    "labelBoxBorderColor": "#5B5FC7",
+    "labelTextColor": "#25265E",
+    "noteBkgColor": "#FFF4D6",
+    "noteBorderColor": "#C78500",
+    "noteTextColor": "#5A3A00",
+    "activationBkgColor": "#DCE8F8",
+    "activationBorderColor": "#2F5597",
+    "sequenceNumberColor": "#FFFFFF"
+  },
+  "sequence": {
+    "diagramMarginX": 22,
+    "diagramMarginY": 18,
+    "actorMargin": 44,
+    "width": 190,
+    "height": 68,
+    "boxMargin": 12,
+    "noteMargin": 15,
+    "messageMargin": 44,
+    "mirrorActors": false,
+    "useMaxWidth": true
+  }
+}}%%
 sequenceDiagram
     autonumber
-    actor Source as Adobe or SAP source
-    participant Orbital as Orbital / Taxi
-    participant Bridge as Python bridge
-    participant Rabbit as RabbitMQ topic exchange
-    participant QueueA as Target queue A
-    participant QueueB as Target queue B
-    participant TargetA as SAP inbox or Adobe stub
-    participant TargetB as FWT stub
+    participant Source as Source
+    participant Orbital as Orbital + Taxi
+    participant Publisher as Publish bridge
+    participant Rabbit as RabbitMQ
+    participant Worker as Route worker
+    participant Target as HTTP target
 
-    Source->>Orbital: Submit customer-account update
-    Orbital->>Orbital: Resolve reusable facts and project target model
-    Orbital->>Bridge: HTTP request plus lineage metadata
-    Bridge->>Bridge: Validate metadata and adapt JSON/XML structurally
-    Bridge->>Rabbit: Persistent mandatory publish with confirm
-    Rabbit-->>Bridge: Broker confirms routable publication
-    Bridge-->>Orbital: 202 Accepted
-    par Independent target copy
-        Rabbit->>QueueA: Route by source pattern
-        QueueA->>Bridge: Deliver with manual acknowledgement
-        Bridge->>Orbital: Invoke route-specific saved query
-        Orbital->>TargetA: Write projected target request
-        TargetA-->>Orbital: 2xx
-        Bridge->>QueueA: ACK
-    and Independent FWT copy
-        Rabbit->>QueueB: Route by source pattern
-        QueueB->>Bridge: Deliver with manual acknowledgement
-        Bridge->>Orbital: Invoke shared FWT saved query
-        Orbital->>TargetB: POST projected FWT request
-        TargetB-->>Orbital: 2xx
-        Bridge->>QueueB: ACK
+    alt Adobe-origin ingress
+        Source->>Orbital: Submit Adobe<br/>customer update
+        Orbital->>Orbital: Resolve facts and<br/>project SAP IDoc
+        Orbital->>Publisher: POST projected IDoc<br/>+ lineage
+        Publisher->>Rabbit: Mandatory persistent<br/>publish
+        Rabbit-->>Publisher: Confirm routable<br/>publication
+        Publisher-->>Orbital: 202 Accepted
+        Orbital-->>Source: 202 Accepted
+    else SAP-origin test ingress
+        Source->>Rabbit: Publish SAP XML<br/>+ lineage metadata
+        Rabbit-->>Source: Confirm accepted<br/>publication
     end
-    Note over QueueA,QueueB: A failed branch is rejected without requeue and dead-lettered independently.
+
+    Note over Rabbit,Target: RabbitMQ creates one independent queue copy<br/>for every configured target route.
+
+    Rabbit->>Worker: Deliver one route copy<br/>(manual ACK)
+    Worker->>Worker: Validate metadata and<br/>adapt XML / JSON
+
+    alt Message validation fails
+        Worker-->>Rabbit: Reject without requeue
+        Rabbit->>Rabbit: Dead-letter only this route copy
+    else Message is valid
+        Worker->>Orbital: Invoke route-specific<br/>saved query
+        Orbital->>Target: Write projected<br/>target request
+
+        alt Target and query return 2xx
+            Target-->>Orbital: 2xx response
+            Orbital-->>Worker: 2xx response
+            Worker-->>Rabbit: ACK route copy
+        else Downstream processing fails
+            Orbital-->>Worker: Error / non-2xx
+            Worker-->>Rabbit: Reject without requeue
+            Rabbit->>Rabbit: Dead-letter only this route copy
+        end
+    end
+
+    Note over Source,Target: Adobe → SAP is the exception: its queue is the simulated target.<br/>No consumer is attached, so the message remains available for inspection.
