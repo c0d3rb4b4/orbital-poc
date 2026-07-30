@@ -193,7 +193,7 @@ def configure_document(doc: Document) -> None:
     settings.append(update_fields)
 
     props = doc.core_properties
-    props.title = "Orbital Customer Account Integration POC — Case Study"
+    props.title = "Orbital Customer Account Integration POC - Case Study"
     props.subject = "Learnings and comparison with the current Azure BIP implementation"
     props.author = "Customer Account Integration POC Team"
     props.keywords = "Orbital, Taxi, RabbitMQ, Azure, BIP, Adobe, SAP, FWT, case study"
@@ -207,7 +207,7 @@ def configure_header_footer(doc: Document) -> None:
     header = section.header
     p = header.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    r = p.add_run("ORBITAL CUSTOMER ACCOUNT POC  |  CASE STUDY")
+    r = p.add_run("ORBITAL CUSTOMER ACCOUNT POC - CASE STUDY")
     set_run_font(r, size=7.5, color=MID_GREY, bold=True)
     p.paragraph_format.space_after = Pt(0)
     p_bdr = p._p.get_or_add_pPr()
@@ -223,7 +223,7 @@ def configure_header_footer(doc: Document) -> None:
     footer = section.footer
     fp = footer.paragraphs[0]
     fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    rr = fp.add_run("30 July 2026   •   Page ")
+    rr = fp.add_run("30 July 2026 - Page ")
     set_run_font(rr, size=8, color=MID_GREY)
     add_field(fp, "PAGE")
     rr = fp.add_run(" of ")
@@ -315,7 +315,7 @@ def add_cover(doc: Document) -> None:
 
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(12)
-    r = p.add_run("A case study in semantic integration with Taxi")
+    r = p.add_run("Adobe, SAP and FWT integration using Taxi")
     set_run_font(r, size=16, color=BLUE, bold=True)
 
     add_accent_rule(doc)
@@ -323,8 +323,8 @@ def add_cover(doc: Document) -> None:
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(32)
     r = p.add_run(
-        "Adobe, SAP and FWT customer-account updates using Orbital, Taxi, "
-        "RabbitMQ and a narrow Python transport bridge"
+        "Customer-account updates using Orbital, Taxi, RabbitMQ and a small "
+        "Python transport bridge"
     )
     set_run_font(r, size=11, color="344054")
 
@@ -336,7 +336,7 @@ def add_cover(doc: Document) -> None:
         (
             ("PREPARED", "30 July 2026"),
             ("DOCUMENT STATUS", "Implementation case study"),
-            ("SCOPE", "Selected-slice POC; not production-ready"),
+            ("SCOPE", "POC covering selected customer-account fields; not production-ready"),
         ),
     ):
         row.cells[0].width = Cm(3.3)
@@ -354,8 +354,8 @@ def add_cover(doc: Document) -> None:
     add_callout(
         doc,
         "Recommendation",
-        "Pilot the Taxi model with production-grade connectivity. Do not replace Azure "
-        "transport based on this POC; decide broker migration separately.",
+        "Test the Taxi model with the existing Azure connections or a supported connector. "
+        "Do not replace Azure transport based on this POC.",
     )
 
 

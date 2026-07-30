@@ -41,40 +41,40 @@ sequenceDiagram
     participant Worker as Route worker
     participant Target as HTTP target
 
-    alt Adobe-origin ingress
+    alt Adobe input
         Source->>Orbital: Submit Adobe<br/>customer update
         Orbital->>Orbital: Resolve facts and<br/>project SAP IDoc
         Orbital->>Publisher: POST projected IDoc<br/>+ lineage
-        Publisher->>Rabbit: Mandatory persistent<br/>publish
-        Rabbit-->>Publisher: Confirm routable<br/>publication
+        Publisher->>Rabbit: Publish persistent message<br/>(mandatory)
+        Rabbit-->>Publisher: Publish confirmed<br/>as routable
         Publisher-->>Orbital: 202 Accepted
         Orbital-->>Source: 202 Accepted
-    else SAP-origin test ingress
+    else SAP test input
         Source->>Rabbit: Publish SAP XML<br/>+ lineage metadata
-        Rabbit-->>Source: Confirm accepted<br/>publication
+        Rabbit-->>Source: Publish confirmed
     end
 
     Note over Rabbit,Target: RabbitMQ creates one independent queue copy<br/>for every configured target route.
 
     Rabbit->>Worker: Deliver one route copy<br/>(manual ACK)
-    Worker->>Worker: Validate metadata and<br/>adapt XML / JSON
+    Worker->>Worker: Validate metadata and<br/>prepare XML or JSON
 
     alt Message validation fails
         Worker-->>Rabbit: Reject without requeue
         Rabbit->>Rabbit: Dead-letter only this route copy
     else Message is valid
         Worker->>Orbital: Invoke route-specific<br/>saved query
-        Orbital->>Target: Write projected<br/>target request
+        Orbital->>Target: Send projected request<br/>to target
 
         alt Target and query return 2xx
             Target-->>Orbital: 2xx response
             Orbital-->>Worker: 2xx response
             Worker-->>Rabbit: ACK route copy
         else Downstream processing fails
-            Orbital-->>Worker: Error / non-2xx
+            Orbital-->>Worker: Error or non-2xx response
             Worker-->>Rabbit: Reject without requeue
             Rabbit->>Rabbit: Dead-letter only this route copy
         end
     end
 
-    Note over Source,Target: Adobe → SAP is the exception: its queue is the simulated target.<br/>No consumer is attached, so the message remains available for inspection.
+    Note over Source,Target: Adobe-to-SAP is the exception: its queue is the simulated target.<br/>No consumer is attached, so the message remains available for inspection.

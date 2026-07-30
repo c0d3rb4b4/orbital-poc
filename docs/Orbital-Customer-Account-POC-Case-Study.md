@@ -2,17 +2,17 @@
 
 # Orbital Customer Account Integration POC
 
-## A case study in semantic integration with Taxi
+## Adobe, SAP and FWT integration using Taxi
 
-Adobe, SAP and FWT customer-account updates using Orbital, Taxi, RabbitMQ and a narrow Python transport bridge
+Customer-account updates using Orbital, Taxi, RabbitMQ and a small Python transport bridge
 
 **Prepared:** 30 July 2026<br/>
 **Document status:** Implementation case study<br/>
-**Scope:** Selected-slice POC; not production-ready
+**Scope:** POC covering selected customer-account fields; not production-ready
 
 > **Recommendation**
 >
-> Pilot the Taxi model with production-grade connectivity. Do not replace Azure transport based on this POC; decide broker migration separately.
+> Test the Taxi model with the existing Azure connections or a supported connector. Do not replace Azure transport based on this POC.
 
 <!-- PAGE BREAK -->
 
@@ -21,39 +21,37 @@ Adobe, SAP and FWT customer-account updates using Orbital, Taxi, RabbitMQ and a 
 1. Summary
 2. Requirement and scope
 3. Solution
-4. Implementation lessons
+4. Implementation notes
 5. Evidence
-6. POC compared with the current Azure BIP
+6. Comparison with the current Azure BIP
 7. Recommendation
 8. Technical reference
 9. Source traceability
 
 ## Scope note
 
-This document compares the POC with the customer-account implementation in the local `bip` repository. It does not compare every Orbital or Azure capability. Evidence comes from code, fixtures, tests, package health and local smoke tests—not production load, security or cost studies.
+This review covers the customer-account implementation in the local `bip` repository. It uses local code, fixtures, tests, package health and smoke tests. No production load, security or cost testing was performed, and the review does not cover every Orbital or Azure feature.
 
 <!-- CONTINUE PAGE -->
 
 # 1. Summary
 
-## Bottom line
-
-- **Semantic reuse worked.** Shared Taxi facts drove a selected update slice across Adobe, SAP and FWT without forcing one physical customer DTO.
-- **The POC is not production-ready.** Real endpoints, full field parity, retries, idempotency, HA, security and operational ownership were not proven.
-- **Keep the Taxi model; test transport separately.** The next test should combine Orbital projections with existing Azure connectivity or a supported native connector.
+- Shared Taxi types mapped the customer-account fields covered by this POC across Adobe, SAP and FWT. Each system kept its own payload.
+- The POC did not establish production readiness. It used no real endpoints and does not cover all fields, retries, idempotency, HA, security controls or service ownership.
+- The next test should run the Orbital mappings through existing Azure connections or a supported connector.
 
 ## POC snapshot
 
 | Question | Answer |
 |---|---|
-| Fixture routes exercised | Adobe→SAP, Adobe→FWT, SAP→Adobe, SAP→FWT |
+| Fixture routes exercised | Adobe to SAP, Adobe to FWT, SAP to Adobe, SAP to FWT |
 | Semantic model | 11 healthy Taxi sources; 0 warnings; 0 errors |
 | Messaging | 4 business queues, 4 DLQs, 8 explicit bindings |
 | Transport adapter | 1 Python image in 3 configured roles |
 | Automated checks | 41 bridge tests plus Ruff and byte compilation |
 | Production systems | None; SAP is a queue/fixture and Adobe/FWT are stubs |
-| Strongest result | Reusable Taxi semantics across three wire contracts |
-| Largest gap | No production connector, resilience, security or ownership proof |
+| What worked | Shared Taxi types mapped Adobe, SAP and FWT payloads |
+| What is missing | Production connector, resilience tests, security design and named owner |
 
 # 2. Requirement and scope
 
@@ -65,7 +63,7 @@ The POC had to:
 2. project SAP updates back into Adobe shape;
 3. simulate the SAP boundary and Azure Service Bus fan-out with RabbitMQ;
 4. add FWT as an outbound target for both origins; and
-5. reuse Taxi business definitions while preserving system-owned contracts.
+5. reuse Taxi business definitions while keeping separate Adobe, SAP and FWT payloads.
 
 ## Azure baseline
 
@@ -76,13 +74,13 @@ The POC had to:
 | Mapping | C# DTOs, mappers and reference-data services | Taxi facts, contracts and projections |
 | SAP boundary | SAP connector and gateway | Retained queue plus XML fixture |
 | Adobe/FWT targets | Authenticated HTTP clients | Nebula capture endpoints |
-| Operations | Azure workflow, archive and notification patterns | Local health, logs, ACK/DLQ and runbook |
+| Operations | Logic App run history, payload archive and failure notifications | Local health, logs, ACK/DLQ and runbook |
 
 ## POC scope
 
 | Included | Simulated | Not tested |
 |---|---|---|
-| Selected Adobe, SAP and FWT update fields | SAP target and SAP-origin producer | Create flows and full contract parity |
+| Selected Adobe, SAP and FWT update fields | SAP target and SAP-origin producer | Create flows and all production fields and behaviours |
 | Taxi types, enums, projections and services | Adobe and FWT HTTP endpoints | Real credentials, gateways and reference data |
 | Persistent routing, confirms, ACK and DLQ | Local Docker deployment | Retry/replay, idempotency, ordering and HA |
 | Synthetic fixtures and expected payloads | Manual smoke-test injection | TLS, least privilege, DR, load and TCO |
@@ -93,35 +91,35 @@ The POC had to:
 
 ![Architecture showing Adobe and SAP inputs flowing through reusable Taxi projections, the transport-only bridge and RabbitMQ layer, and independent SAP, Adobe and FWT outcomes](assets/case-study-architecture.png)
 
-**Figure 1 — POC architecture.** Taxi owns business meaning and projection. The bridge and RabbitMQ own transport. Green nodes are sources or simulated outcomes.
+**Figure 1: POC architecture.** Taxi handles mapping. The bridge and RabbitMQ handle transport. Green boxes are sources or simulated outputs.
 
 ## Routes
 
 Queue names below omit the common `poc.customer-account.` prefix.
 
-| Origin | Routing key → queue | Consumer | Outcome |
+| Origin | Routing key and queue | Consumer | Outcome |
 |---|---|---|---|
-| Adobe | `customer-account.adobe.updated`<br/>→ `adobe-to-sap` | None | Retained simulated SAP inbox copy |
-| Adobe | `customer-account.adobe.updated`<br/>→ `adobe-to-fwt` | FWT worker | FWT POST capture |
-| SAP | `customer-account.sap.updated`<br/>→ `sap-to-adobe` | Main bridge worker | Adobe PUT capture |
-| SAP | `customer-account.sap.updated`<br/>→ `sap-to-fwt` | FWT worker | FWT POST capture |
+| Adobe | `customer-account.adobe.updated`<br/>queue: `adobe-to-sap` | None | Retained simulated SAP inbox copy |
+| Adobe | `customer-account.adobe.updated`<br/>queue: `adobe-to-fwt` | FWT worker | FWT POST capture |
+| SAP | `customer-account.sap.updated`<br/>queue: `sap-to-adobe` | Main bridge worker | Adobe PUT capture |
+| SAP | `customer-account.sap.updated`<br/>queue: `sap-to-fwt` | FWT worker | FWT POST capture |
 
-Bindings route only those four source-to-target paths. No FWT-origin route exists. This is topology-level loop prevention only; production idempotency and source suppression remain open.
+Bindings route only those four source-to-target paths. There is no FWT-origin route. This prevents routing loops in the POC, but it does not prevent duplicate business updates.
 
-The retained Adobe→SAP copy does not emit a SAP return; SAP-origin tests are injected separately. This reproduces local fan-out behaviour, not BIP topology or wire-format parity—RabbitMQ carries SAP XML.
+The Adobe-to-SAP queue does not emit a SAP return. SAP-origin tests are injected separately. The local queues do not match the BIP topology or payload format; RabbitMQ carries SAP XML.
 
 ## Semantic reuse
 
-Taxi keeps each wire contract independent and maps equivalent business concepts through narrow types and enum synonyms.
+Adobe, SAP and FWT keep separate payloads. Taxi reuses named types and enum values for fields that mean the same thing.
 
 | Business fact | Adobe | SAP | FWT | Rule |
 |---|---|---|---|---|
 | SAP identity | `sap_unique_id` custom attribute | `KUNNR` | `id` | Preserve as a string, including leading zeroes |
-| Adobe identity | Adobe `id` | Not equivalent to `KUNNR` | Not required | Supply an explicit cross-reference for SAP→Adobe |
+| Adobe identity | Adobe `id` | Not equivalent to `KUNNR` | Not required | Supply an explicit cross-reference for SAP-to-Adobe |
 | Status | Adobe status string | `KATR5` code | FWT status string | Link with shared enum meaning |
 | Contact preference | Email/post flags | `KATR10` code | Email/post booleans | Combine once; expand per target |
 | Date of birth | `yyyyMMdd` | `RGDATE` | `yyyy-MM-dd` | Apply deterministic formatting |
-| Name/address | Nested JSON | IDoc segments | Nested JSON | Keep target ownership and field meaning |
+| Name/address | Nested JSON | IDoc segments | Nested JSON | Keep target-specific fields separate |
 
 Shared fixture values can hide the Adobe-ID/SAP-`KUNNR` distinction. The POC therefore preserves SAP leading zeroes and requires an explicit Adobe cross-reference.
 
@@ -133,39 +131,39 @@ Shared fixture values can hide the Adobe-ID/SAP-`KUNNR` distinction. The POC the
 | Orbital | Taxi compilation, saved queries and HTTP service calls | AMQP transport in this stack |
 | Python bridge | Metadata validation, XML/JSON adaptation, publish/consume and ACK | Customer mapping rules |
 | RabbitMQ | Durable route copies, confirms, delivery and DLQ routing | Semantic transformation |
-| Nebula | Observable Adobe/FWT test responses | Persistence or production behaviour |
+| Nebula | Captured Adobe/FWT requests and fixed responses | Persistence or production behaviour |
 
-The bridge exists because this deployed workspace has HTTP connectivity but no configured supported AMQP Taxi connector. A supported native connector can replace it without changing the Taxi mappings.
+The deployed Orbital workspace exposes HTTP, but no supported AMQP Taxi connector was configured. The Python bridge fills that gap. A supported native connector can replace it without changing the Taxi mappings.
 
 ## Delivery lifecycle
 
 ![Sequence showing separate Adobe and SAP ingress paths, confirmed RabbitMQ publication, independent route delivery, acknowledgement after success, and route-specific dead-lettering after failure](assets/case-study-sequence.png)
 
-**Figure 2 — Publish and route delivery.** Each consumed route copy uses `prefetch=1`, is acknowledged only after its Orbital saved query returns 2xx following the target call, and is dead-lettered independently on failure. Ingress success confirms publication—not every subscriber. Adobe→SAP remains unconsumed as the simulated target.
+**Figure 2: Publish and route delivery.** Each worker uses `prefetch=1` and sends an ACK only after Orbital returns 2xx from the saved query. A failed route goes to its DLQ. A successful ingress only means RabbitMQ accepted the publish. Adobe-to-SAP is the unconsumed SAP stub.
 
-# 4. Implementation lessons
+# 4. Implementation notes
 
 ## Implementation path
 
 ![Three-stage implementation journey from the core Adobe and SAP routes through a typed FWT extension to local verification](assets/case-study-journey.png)
 
-**Figure 3 — Implementation path.** Core routes came first, the shared model was extended to FWT, then local verification was added.
+**Figure 3: Implementation path.** Work was completed in three stages: core routes, FWT routes and local checks.
 
 ## Challenges
 
-The XML findings below apply to the tested Orbital 0.38 version and configuration; they are not product-wide claims.
+These XML findings were observed on Orbital 0.38 in this setup. They should be retested after any runtime upgrade.
 
-| Issue | Response | Lesson |
+| Issue | Response | Finding |
 |---|---|---|
 | Primitive-heavy Taxi model produced warnings | Added narrow facts, distinct identities and enum synonyms | Reuse meaning, not `String` compatibility |
 | No configured AMQP connector | Added a transport-only FastAPI/Pika bridge | Keep adapters small and replaceable |
 | Orbital 0.38 could not serialize outbound `@Xml` model on this path | Taxi builds a plain parameter model; bridge emits XML | Separate projection from wire serialization |
 | Concurrent XML parsing raised `FWK005` | FWT workers adapt XML to equivalent JSON | Test fan-out concurrently |
-| SAP number could be mistaken for Adobe ID | Required explicit Adobe cross-reference metadata | Resolve identities explicitly; do not treat one system ID as another |
+| SAP number could be mistaken for Adobe ID | Required explicit Adobe cross-reference metadata | System IDs need explicit mapping |
 | Active queues appeared empty | Correlated queue, worker, DLQ and target-capture evidence | An empty queue does not prove failure |
 | Idle publish connection could return 503 | Close failed connection; reconnect on next call | Do not retry uncertain publishes without idempotency |
-| Source and runtime topology deploy separately | Coordinated Git, Compose and Rabbit definitions | Treat them as one release |
-| Adobe and later SAP confirmation can both reach FWT | Left duplicate policy explicit and unresolved | Fan-out can duplicate effects without forming a loop |
+| Source and runtime topology deploy separately | Coordinated Git, Compose and Rabbit definitions | Deploy source and runtime changes together |
+| Adobe and later SAP confirmation can both reach FWT | Documented the gap; no deduplication rule yet | Fan-out can create duplicate updates without a routing loop |
 
 # 5. Evidence
 
@@ -173,81 +171,81 @@ The XML findings below apply to the tested Orbital 0.38 version and configuratio
 
 | Claim | Evidence | Status |
 |---|---|---|
-| Shared semantics span three contracts | Taxi facts/enums drive Adobe, SAP and FWT shapes | Proven for selected fields |
-| Adobe reaches simulated SAP | Expected XML reaches retained SAP queue | Proven with fixture |
-| Adobe reaches FWT independently | FWT route ACK plus expected capture | Proven with fixture |
-| SAP reaches Adobe and FWT independently | Two ACKs plus both expected captures | Proven with fixture |
-| Delivery mechanics are explicit | Persistent publish, confirms, ACK and route DLQ | Component pattern proven |
-| Taxi package is clean | 11 sources; healthy; 0 warnings; 0 errors | Proven in tested workspace |
-| Bridge component is tested | 41 tests plus Ruff and byte compilation | Proven at component level |
-| Production replacement readiness | Real systems, parity, resilience and security untested | Not proven |
+| The same Taxi types are used to build Adobe, SAP and FWT payloads | Taxi facts and enums build all three payload shapes | Covered for selected fields |
+| Adobe input reaches the simulated SAP queue | The retained XML matches the expected fixture | Matched expected fixture |
+| Adobe input reaches FWT independently | FWT route ACK plus expected capture | Matched expected fixture |
+| SAP input reaches Adobe and FWT independently | Two ACKs plus both expected captures | Matched expected fixtures |
+| Publisher confirms, ACKs and DLQs work per route | Persistent publish, confirms, ACK and route DLQ | Passed component tests |
+| Taxi compiles without warnings or errors | 11 healthy sources; 0 warnings; 0 errors | Checked in this workspace |
+| The bridge passes its component tests | 41 tests plus Ruff and byte compilation | Passed component tests |
+| Production use | Real systems, parity, resilience and security were not tested | Not tested |
 
 ## Evidence limits
 
-- Fixtures prove a selected update slice, not complete BIP or FWT behaviour.
-- Unsupported FWT fields were deliberately excluded until authoritative, deterministic sources are available.
+- Fixtures cover only the fields in this POC, not all BIP or FWT behaviour.
+- FWT fields with no trusted source were left out.
 - The bridge tests use fakes and HTTP mocks; full broker-to-Orbital assertions are still partly manual.
-- Nebula captures requests but is not a contract-testing or system-of-record service; concurrent matching is unsafe until captures record lineage/correlation IDs.
+- Nebula records requests; it does not validate or persist customers. Parallel tests can match the wrong capture until each record includes a correlation ID.
 - A `202` proves a confirmed routable publish, not all downstream completion.
 - Persistent messages do not imply exactly-once delivery, HA or zero loss.
 - No load, failover, security, cost or production comparison test was run.
 
-# 6. POC compared with the current Azure BIP
+# 6. Comparison with the current Azure BIP
 
 ## Comparison
 
 | Dimension | Orbital/Taxi POC | Current Azure BIP |
 |---|---|---|
-| Semantic modelling | Typed facts, enum synonyms and compiler feedback make intent explicit | Broader production mapping exists, but intent is spread across C#, schemas and workflows |
-| Adding a target | FWT reused existing facts and one shared projection | Established Function/Logic App patterns and larger connector ecosystem |
-| Transport | Explicit per-edge queues, ACK and DLQ state | Managed Service Bus and real SAP gateway/connector path |
-| Reliability | Confirms, persistence and manual ACK demonstrated | Inspected Function actions disable retry; deployed Service Bus settlement, max-delivery and connector policies were not verified |
+| Semantic modelling | Taxi puts mapping rules in one place and lets the compiler flag mismatches | Broader production mapping exists, but rules are spread across C#, schemas and workflows |
+| Adding a target | FWT reused existing facts and one shared projection | Existing Function/Logic App deployments and managed connectors |
+| Transport | A separate queue and DLQ for each route | Managed Service Bus and real SAP gateway/connector path |
+| Reliability | Confirms, persistence and manual ACK demonstrated | Some inspected Functions disable retries. Live Service Bus and connector retry/dead-letter settings were not checked |
 | Local development | Fast Docker, RabbitMQ, fixtures and Nebula loop | Production telemetry exists, but isolated end-to-end local testing is harder |
-| Security | Safe synthetic environment only | Existing OAuth/connector resources; the POC did not test equivalent controls |
-| Coverage/maturity | Update-only selected slice; runtime workarounds and custom bridge | Create/update and much broader SAP/FWT mapping |
+| Security | Local stubs; production security was not tested | Existing OAuth and connector resources; the POC did not test equivalent controls |
+| Functional coverage | Selected update fields, runtime workarounds and a custom bridge | Create/update and much broader SAP/FWT mapping |
 | Cost/performance | Unknown | Unknown; no benchmark or TCO comparison was performed |
 
 ## Open decisions
 
 | Issue | Why it matters | Decision needed |
 |---|---|---|
-| SAP-shaped broker event | Adobe→FWT passes through SAP IDoc shape, so FWT-only facts may be lost | Keep SAP coupling, publish a neutral event, or project directly per source |
-| Broker replacement | Taxi's value does not depend on RabbitMQ | Test Azure transport/native connector before changing broker |
-| Adobe/SAP identity | POC preserves leading zeroes and requires an Adobe cross-reference; inspected BIP uses SAP `KUNNR` and integer conversion in parts of the Adobe path | Define authoritative cross-reference and leading-zero policy |
-| Duplicate FWT effects | Adobe update and later SAP confirmation may represent one business change | Define business key, version and deduplication policy |
-| Response semantics | POC waits for broker confirmation; current Adobe Logic App can respond earlier | Choose the external API contract explicitly |
-| Bridge ownership | Workarounds add a deployable service that must be operated | Replace with native connector or assign owner, SLO and upgrade policy |
+| SAP-shaped broker message | Adobe-to-FWT passes through SAP IDoc shape, so FWT-only facts may be lost | Keep SAP coupling, publish a neutral event, or project directly per source |
+| Broker replacement | Taxi mappings can run with another broker | Test Azure transport or a native connector before changing broker |
+| Adobe/SAP identity | The POC keeps leading zeroes and supplies the Adobe ID separately. Some BIP code parses `KUNNR` as an integer for Adobe | Choose who owns the ID cross-reference and preserve leading zeroes |
+| Duplicate FWT updates | Adobe update and later SAP confirmation may represent one business change | Choose the deduplication key and decide whether an Adobe update plus SAP confirmation counts as one change |
+| Response semantics | POC waits for broker confirmation; current Adobe Logic App can respond earlier | Decide whether `202` means queued or all targets completed |
+| Bridge ownership | Workarounds add a deployable service that must be operated | Replace it with a native connector, or name the team that will run and upgrade it and set an SLO |
 
 # 7. Recommendation
 
 > **Next step**
 >
-> Pilot Taxi/Orbital mapping with existing Azure transport. Decide on broker replacement separately.
+> Use Taxi and Orbital mappings with existing Azure transport for the next test. Review broker replacement separately.
 
 ## Options
 
 | Option | Value | Risk | Position |
 |---|---|---|---|
-| Keep Azure unchanged | Lowest migration risk | Semantic improvement is lost | Baseline |
-| Taxi/Orbital semantics with Azure transport | Tests Taxi reuse while keeping existing connectivity | Requires a supported connector boundary | **Recommended next test** |
-| Full Orbital/RabbitMQ replacement | Maximum platform change | Reliability, security, skills and migration case unproven | Not recommended yet |
+| Keep Azure unchanged | No migration work | Taxi model is not used | Current baseline |
+| Taxi and Orbital mappings with Azure transport | Tests Taxi reuse while keeping existing connections | Requires a supported connector | **Recommended next test** |
+| Full Orbital and RabbitMQ replacement | Replaces Azure Service Bus and connectors with RabbitMQ and the bridge | No evidence yet for reliability, security, team support or migration cost | Not recommended yet |
 
 ## Pilot plan
 
-1. **Verify parity.** Create a route/field matrix and automate golden-master comparisons against representative BIP payloads.
-2. **Prove connectivity.** Test Azure Service Bus or a supported native AMQP connector on a pinned Orbital version.
-3. **Add delivery controls.** Add idempotency, retry/backoff, replay, poison handling, lineage and restart tests.
-4. **Shadow then canary.** Run with side effects suppressed, reconcile results, then pilot one reversible route with rollback.
+1. Build a route and field matrix, then automate comparisons against representative BIP payloads.
+2. Test Azure Service Bus or a supported native AMQP connector on a pinned Orbital version.
+3. Add idempotency, retry and backoff, replay, poison handling, lineage and restart tests.
+4. Run a shadow test, compare the results, then run one route as a canary with a tested rollback.
 
 ## Before production
 
-| Gate | Minimum evidence |
+| Area | Evidence needed |
 |---|---|
-| Business and identity | Complete field/rule parity, authoritative cross-reference, duplicate policy, domain sign-off |
+| Business and identity | All required fields and rules match BIP; domain owners agree the ID source and duplicate handling |
 | Delivery and resilience | At-least-once contract, idempotency, retry/replay, ordering, HA and DR tests |
 | Security and operations | TLS, managed secrets, least privilege, PII controls, dashboards, alerts, runbooks and owner |
 | Scale and migration | Throughput/latency targets, peak/soak tests, shadow reconciliation, canary and rollback |
-| Commercial and support | Three-year TCO, skills/on-call plan, vendor support and accountable team |
+| Cost and ownership | Three-year cost estimate, on-call skills, vendor support and a named team |
 
 <!-- PAGE BREAK -->
 
@@ -257,9 +255,9 @@ The XML findings below apply to the tested Orbital 0.38 version and configuratio
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/q/customer-account/from-adobe` | Adobe facts → SAP publish model → bridge |
-| `POST /api/q/customer-account/from-sap` | SAP XML + Adobe cross-reference → Adobe write |
-| `POST /api/q/customer-account/to-fwt` | IDoc facts → FWT write |
+| `POST /api/q/customer-account/from-adobe` | Projects Adobe facts into the SAP publish model, then calls the bridge |
+| `POST /api/q/customer-account/from-sap` | Projects SAP XML and the Adobe cross-reference into an Adobe write |
+| `POST /api/q/customer-account/to-fwt` | Projects IDoc facts into an FWT write |
 
 ## Runtime inventory
 
@@ -286,7 +284,7 @@ The XML findings below apply to the tested Orbital 0.38 version and configuratio
 
 # 9. Source traceability
 
-The detailed implementation and runbook remain in `orbital-poc/README.md`. BIP examples inspected:
+See `orbital-poc/README.md` for implementation details and the runbook. These BIP files were reviewed:
 
 - **Adobe ingress:** `la-bip-adobe-customeraccount/LogicApp.json`, `AccountCreation.cs`, `func-bip-AdobeCustomerAccount.cs`.
 - **SAP mapping/gateway:** `MapCreateAccountToIdoc.cs`, `func-bip-CustomerAccountSap.cs`, `MapCanonicalCustomerAccount.cs`, both SAP customer-account Logic Apps, `ZBUPA_CBO.XSD`.

@@ -24,12 +24,12 @@ flowchart TB
         SapInput["SAP IDoc XML fixture"]
     end
 
-    Facts["Reusable Taxi semantics<br/><b>typed facts + enum synonyms</b>"]
-    AdobeProjection["Orbital + Taxi<br/><b>Adobe → SAP projection</b>"]
-    Transport["Python bridge + RabbitMQ<br/><b>transport only</b><br/>confirmed publish • topic fan-out • ACK/DLQ"]
-    TargetProjection["Orbital + Taxi<br/><b>SAP IDoc → Adobe / FWT projections</b>"]
+    Facts["Shared Taxi model<br/><b>facts, types and enum synonyms</b>"]
+    AdobeProjection["Orbital + Taxi<br/><b>Adobe-to-SAP projection</b>"]
+    Transport["Python bridge + RabbitMQ<br/><b>transport only</b><br/>publisher confirms<br/>topic routing<br/>ACK and DLQ"]
+    TargetProjection["Orbital + Taxi<br/><b>SAP IDoc projections<br/>for Adobe and FWT</b>"]
 
-    subgraph Outcomes["Independent route outcomes"]
+    subgraph Outcomes["Route outputs"]
         direction LR
         SapInbox["Simulated SAP inbox<br/>retained queue copy"]
         AdobeStub["Adobe update<br/>Nebula capture"]
@@ -40,10 +40,10 @@ flowchart TB
     AdobeProjection -->|"projected SAP IDoc"| Transport
     SapInput -->|"persistent SAP XML"| Transport
 
-    Transport -->|"Adobe-origin SAP copy"| SapInbox
+    Transport -->|"Adobe-to-SAP queue copy"| SapInbox
     Transport -->|"consumed route copies"| TargetProjection
-    TargetProjection -->|"SAP-origin PUT"| AdobeStub
-    TargetProjection -->|"Adobe / SAP-origin POST"| FwtStub
+    TargetProjection -->|"SAP-to-Adobe PUT"| AdobeStub
+    TargetProjection -->|"Adobe or SAP to FWT POST"| FwtStub
 
     Facts -. "reused by" .-> AdobeProjection
     Facts -. "reused by" .-> TargetProjection

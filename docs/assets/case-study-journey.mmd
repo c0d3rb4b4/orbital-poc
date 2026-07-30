@@ -15,9 +15,9 @@
   }
 }}%%
 flowchart LR
-    A["<b>1. Core routes</b><br/>Adobe → SAP<br/>SAP → Adobe"]
-    B["<b>2. Typed FWT extension</b><br/>shared model • 0 warnings<br/>FWT via 2 queues"]
-    C["<b>3. Local verification</b><br/>41 tests • health<br/>confirms • ACK • DLQ"]
+    A["<b>1. Core routes</b><br/>Adobe to SAP<br/>SAP to Adobe"]
+    B["<b>2. Add typed FWT routes</b><br/>reuse shared Taxi model<br/>two FWT queues, zero Taxi warnings"]
+    C["<b>3. Verify locally</b><br/>41 tests and health checks<br/>publisher confirms, ACK and DLQ"]
 
     A --> B --> C
 
