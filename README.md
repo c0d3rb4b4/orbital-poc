@@ -772,13 +772,22 @@ These controls prevent transport echo in the POC. They do not provide production
 
 ## Repository layout and file-by-file reference
 
-The Git repository contains 41 meaningful source/configuration/fixture files. `.git`, virtual environments, bytecode, pytest caches, and Ruff caches are excluded from this inventory because they are generated artifacts.
+The Git repository contains 48 meaningful source/configuration/fixture/documentation files. `.git`, virtual environments, bytecode, pytest caches, and Ruff caches are excluded from this inventory because they are generated artifacts.
 
 ```text
 orbital-poc/
 ├── .gitignore
 ├── README.md
 ├── taxi.conf
+├── docs/
+│   ├── Orbital-Customer-Account-POC-Case-Study.md
+│   ├── Orbital-Customer-Account-POC-Case-Study.docx
+│   ├── build_case_study_docx.py
+│   └── assets/
+│       ├── case-study-architecture.mmd
+│       ├── case-study-architecture.png
+│       ├── case-study-sequence.mmd
+│       └── case-study-sequence.png
 ├── orbital/
 │   ├── config/
 │   │   └── services.conf
@@ -838,6 +847,18 @@ orbital-poc/
 | `.gitignore` | Excludes Python bytecode, virtual environments, and pytest/Ruff caches so bridge-generated artifacts do not pollute the Taxi repository. |
 | `README.md` | This architecture, operations, testing, troubleshooting, and continuation guide. It is intended to be sufficient for a new engineer to understand and resume the POC. |
 | `taxi.conf` | Defines package `com.lalit/orbital-poc` version `0.1.0`, uses `src/` as the Taxi source root, and includes project-local service configuration and Nebula scripts as additional Orbital sources. |
+
+### Case-study documentation
+
+| File | What it does and why it exists |
+|---|---|
+| `docs/Orbital-Customer-Account-POC-Case-Study.md` | Maintains the editable source for the decision-oriented case study. It explains the requirement, implementation journey, evidence, challenges, Azure/BIP comparison, architectural implications, recommendation, and production decision gates without duplicating this README's runbook role. |
+| `docs/Orbital-Customer-Account-POC-Case-Study.docx` | Provides the polished, macro-free Word deliverable for upload to Google Drive and opening in Google Docs. It embeds the diagrams and uses standard Office Open XML, Arial fonts, tables, headers, footers, and page fields. |
+| `docs/build_case_study_docx.py` | Rebuilds the DOCX deterministically from the Markdown source using `python-docx`. It owns presentation styling, Markdown-to-Word conversion, embedded diagrams, metadata, page fields, callouts, and accessibility descriptions; it does not alter POC runtime behavior. |
+| `docs/assets/case-study-architecture.mmd` | Mermaid source for the simplified case-study architecture, separating semantic projection from transport and simulated endpoints. Keeping the source makes the embedded diagram reviewable and editable. |
+| `docs/assets/case-study-architecture.png` | Rendered architecture image embedded in the DOCX for portable Google Docs/Word display. |
+| `docs/assets/case-study-sequence.mmd` | Mermaid source for the generic publish/fan-out/acknowledgement sequence used by the case study. |
+| `docs/assets/case-study-sequence.png` | Rendered sequence image embedded in the DOCX so the document has no external image dependency. |
 
 ### Orbital-specific files
 

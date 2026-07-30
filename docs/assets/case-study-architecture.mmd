@@ -1,0 +1,39 @@
+flowchart LR
+    Adobe["Adobe JSON"]
+    SapInput["SAP XML fixture"]
+
+    subgraph Orbital["Orbital + Taxi semantic layer"]
+        A2S["Adobe to SAP projection"]
+        S2A["SAP to Adobe projection"]
+        ToFWT["Shared SAP IDoc to FWT projection"]
+        Facts["Reusable customer facts and enum meanings"]
+    end
+
+    subgraph Transport["Python bridge + RabbitMQ"]
+        Bridge["HTTP / AMQP bridge"]
+        Exchange{{"Topic exchange"}}
+        ASQ["Adobe to SAP queue\nSimulated SAP inbox"]
+        AFQ["Adobe to FWT queue"]
+        SAQ["SAP to Adobe queue"]
+        SFQ["SAP to FWT queue"]
+    end
+
+    Adobe --> A2S --> Bridge --> Exchange
+    SapInput --> Exchange
+    Exchange --> ASQ
+    Exchange --> AFQ --> Bridge --> ToFWT
+    Exchange --> SAQ --> Bridge --> S2A
+    Exchange --> SFQ --> Bridge --> ToFWT
+    S2A --> AdobeStub["Nebula Adobe capture"]
+    ToFWT --> FWTStub["Nebula FWT capture"]
+
+    Facts -. "typed facts" .-> A2S
+    Facts -. "typed facts" .-> S2A
+    Facts -. "typed facts" .-> ToFWT
+
+    classDef semantic fill:#e8f1ff,stroke:#2962a3,color:#17324d;
+    classDef transport fill:#fff2d9,stroke:#b27000,color:#4f3500;
+    classDef endpoint fill:#eaf7ed,stroke:#2d7a45,color:#173d24;
+    class A2S,S2A,ToFWT,Facts semantic;
+    class Bridge,Exchange,ASQ,AFQ,SAQ,SFQ transport;
+    class Adobe,SapInput,AdobeStub,FWTStub endpoint;

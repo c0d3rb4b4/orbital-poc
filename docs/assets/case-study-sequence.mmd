@@ -1,0 +1,34 @@
+sequenceDiagram
+    autonumber
+    actor Source as Adobe or SAP source
+    participant Orbital as Orbital / Taxi
+    participant Bridge as Python bridge
+    participant Rabbit as RabbitMQ topic exchange
+    participant QueueA as Target queue A
+    participant QueueB as Target queue B
+    participant TargetA as SAP inbox or Adobe stub
+    participant TargetB as FWT stub
+
+    Source->>Orbital: Submit customer-account update
+    Orbital->>Orbital: Resolve reusable facts and project target model
+    Orbital->>Bridge: HTTP request plus lineage metadata
+    Bridge->>Bridge: Validate metadata and adapt JSON/XML structurally
+    Bridge->>Rabbit: Persistent mandatory publish with confirm
+    Rabbit-->>Bridge: Broker confirms routable publication
+    Bridge-->>Orbital: 202 Accepted
+    par Independent target copy
+        Rabbit->>QueueA: Route by source pattern
+        QueueA->>Bridge: Deliver with manual acknowledgement
+        Bridge->>Orbital: Invoke route-specific saved query
+        Orbital->>TargetA: Write projected target request
+        TargetA-->>Orbital: 2xx
+        Bridge->>QueueA: ACK
+    and Independent FWT copy
+        Rabbit->>QueueB: Route by source pattern
+        QueueB->>Bridge: Deliver with manual acknowledgement
+        Bridge->>Orbital: Invoke shared FWT saved query
+        Orbital->>TargetB: POST projected FWT request
+        TargetB-->>Orbital: 2xx
+        Bridge->>QueueB: ACK
+    end
+    Note over QueueA,QueueB: A failed branch is rejected without requeue and dead-lettered independently.
