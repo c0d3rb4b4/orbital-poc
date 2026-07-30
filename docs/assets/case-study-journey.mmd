@@ -1,0 +1,29 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Arial",
+    "fontSize": "18px",
+    "lineColor": "#667085",
+    "primaryTextColor": "#17365D"
+  },
+  "flowchart": {
+    "curve": "linear",
+    "nodeSpacing": 32,
+    "rankSpacing": 36,
+    "diagramPadding": 18,
+    "htmlLabels": true
+  }
+}}%%
+flowchart LR
+    A["<b>1. Core routes</b><br/>Adobe → SAP<br/>SAP → Adobe"]
+    B["<b>2. Typed FWT extension</b><br/>shared model • 0 warnings<br/>FWT via 2 queues"]
+    C["<b>3. Local verification</b><br/>41 tests • health<br/>confirms • ACK • DLQ"]
+
+    A --> B --> C
+
+    classDef first fill:#E8F1FF,stroke:#2962A3,stroke-width:2px,color:#17324D;
+    classDef middle fill:#EEF2FF,stroke:#5B5FC7,stroke-width:2px,color:#25265E;
+    classDef final fill:#EAF7ED,stroke:#2D7A45,stroke-width:2px,color:#173D24;
+    class A first;
+    class B middle;
+    class C final;

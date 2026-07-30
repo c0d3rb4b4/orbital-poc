@@ -772,7 +772,7 @@ These controls prevent transport echo in the POC. They do not provide production
 
 ## Repository layout and file-by-file reference
 
-The Git repository contains 48 meaningful source/configuration/fixture/documentation files. `.git`, virtual environments, bytecode, pytest caches, and Ruff caches are excluded from this inventory because they are generated artifacts.
+The Git repository contains 50 meaningful source/configuration/fixture/documentation files. `.git`, virtual environments, bytecode, pytest caches, and Ruff caches are excluded from this inventory because they are generated artifacts.
 
 ```text
 orbital-poc/
@@ -787,7 +787,9 @@ orbital-poc/
 │       ├── case-study-architecture.mmd
 │       ├── case-study-architecture.png
 │       ├── case-study-sequence.mmd
-│       └── case-study-sequence.png
+│       ├── case-study-sequence.png
+│       ├── case-study-journey.mmd
+│       └── case-study-journey.png
 ├── orbital/
 │   ├── config/
 │   │   └── services.conf
@@ -859,6 +861,8 @@ orbital-poc/
 | `docs/assets/case-study-architecture.png` | Rendered architecture image embedded in the DOCX for portable Google Docs/Word display. |
 | `docs/assets/case-study-sequence.mmd` | Mermaid source for the generic publish/fan-out/acknowledgement sequence used by the case study. |
 | `docs/assets/case-study-sequence.png` | Rendered sequence image embedded in the DOCX so the document has no external image dependency. |
+| `docs/assets/case-study-journey.mmd` | Mermaid source for the three-stage implementation path. It replaces several pages of narrative with one editable visual. |
+| `docs/assets/case-study-journey.png` | Rendered implementation-path image embedded in the DOCX for portable Word and Google Docs display. |
 
 ### Orbital-specific files
 

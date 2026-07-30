@@ -84,6 +84,11 @@ def set_repeat_table_header(row) -> None:
     tr_pr.append(tbl_header)
 
 
+def prevent_table_row_split(row) -> None:
+    tr_pr = row._tr.get_or_add_trPr()
+    tr_pr.append(OxmlElement("w:cantSplit"))
+
+
 def set_keep_with_next(paragraph, value=True) -> None:
     paragraph.paragraph_format.keep_with_next = value
 
@@ -193,7 +198,7 @@ def configure_document(doc: Document) -> None:
     props.author = "Customer Account Integration POC Team"
     props.keywords = "Orbital, Taxi, RabbitMQ, Azure, BIP, Adobe, SAP, FWT, case study"
     props.comments = "Generated from the checked-in Markdown source."
-    props.created = datetime(2026, 7, 29)
+    props.created = datetime(2026, 7, 30)
     props.modified = datetime(2026, 7, 30)
 
 
@@ -218,7 +223,7 @@ def configure_header_footer(doc: Document) -> None:
     footer = section.footer
     fp = footer.paragraphs[0]
     fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    rr = fp.add_run("29 July 2026   •   Page ")
+    rr = fp.add_run("30 July 2026   •   Page ")
     set_run_font(rr, size=8, color=MID_GREY)
     add_field(fp, "PAGE")
     rr = fp.add_run(" of ")
@@ -329,9 +334,9 @@ def add_cover(doc: Document) -> None:
     for row, (label, value) in zip(
         meta.rows,
         (
-            ("PREPARED", "29 July 2026"),
+            ("PREPARED", "30 July 2026"),
             ("DOCUMENT STATUS", "Implementation case study"),
-            ("SCOPE", "Bounded proof of concept; not a production-readiness approval"),
+            ("SCOPE", "Selected-slice POC; not production-ready"),
         ),
     ):
         row.cells[0].width = Cm(3.3)
@@ -348,13 +353,9 @@ def add_cover(doc: Document) -> None:
     doc.add_paragraph().paragraph_format.space_after = Pt(10)
     add_callout(
         doc,
-        "Decision position",
-        "The POC proves that reusable Taxi semantics can drive a selected customer-account "
-        "update slice across three independent wire contracts. It does not yet prove that "
-        "Orbital and RabbitMQ should replace the current Azure integration platform. The "
-        "recommended next step is a controlled production-readiness pilot, with the Taxi "
-        "semantic layer retained as the main demonstrated value and broker replacement "
-        "assessed separately.",
+        "Recommendation",
+        "Pilot the Taxi model with production-grade connectivity. Do not replace Azure "
+        "transport based on this POC; decide broker migration separately.",
     )
 
 
@@ -368,6 +369,7 @@ def add_table(doc: Document, rows: list[list[str]]) -> None:
     set_repeat_table_header(table.rows[0])
     for row_index, values in enumerate(rows):
         row = table.rows[row_index]
+        prevent_table_row_split(row)
         for col_index in range(columns):
             cell = row.cells[col_index]
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -380,7 +382,7 @@ def add_table(doc: Document, rows: list[list[str]]) -> None:
             text = values[col_index] if col_index < len(values) else ""
             p = cell.paragraphs[0]
             p.paragraph_format.space_after = Pt(0)
-            if len(rows) <= 11 and row_index < len(rows) - 1:
+            if len(rows) <= 6 and row_index < len(rows) - 1:
                 p.paragraph_format.keep_with_next = True
             add_inline(p, text, default_bold=row_index == 0)
             for run in p.runs:
@@ -508,12 +510,13 @@ def parse_markdown(doc: Document, lines: list[str]) -> None:
             while index < len(lines) and lines[index].strip().startswith(">"):
                 quote_lines.append(lines[index].strip().lstrip(">").strip())
                 index += 1
-            text = " ".join(quote_lines)
             title = "Key point"
-            if "  " in text:
-                maybe_title, body = text.split("  ", 1)
-                title = maybe_title.replace("**", "")
-                text = body
+            title_match = re.fullmatch(r"\*\*(.+)\*\*", quote_lines[0]) if quote_lines else None
+            if title_match:
+                title = title_match.group(1)
+                text = " ".join(line for line in quote_lines[1:] if line)
+            else:
+                text = " ".join(quote_lines)
             add_callout(doc, title, text.replace("**", ""))
             continue
 
